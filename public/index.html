@@ -1,0 +1,63 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Audio → Video</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0f1115;--card:#181b22;--fg:#e8eaf0;--mut:#8a90a0;--ac:#6c8cff;--bad:#ff6b6b;--ok:#4ade80}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px system-ui,sans-serif;padding:24px;max-width:1100px;margin:auto}
+h1{font-size:22px}button{background:var(--ac);color:#fff;border:0;padding:8px 14px;border-radius:8px;cursor:pointer;font-weight:600}
+button.g{background:#2a2f3a}button.d{background:#3a2226}button:disabled{opacity:.4}
+.card{background:var(--card);border-radius:12px;padding:16px;margin:14px 0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.steps span{padding:4px 10px;border-radius:99px;background:#2a2f3a;color:var(--mut);font-size:13px}.steps .on{background:var(--ac);color:#fff}.steps .done{color:var(--ok)}
+.scene{display:grid;grid-template-columns:240px 1fr;gap:14px;padding:12px 0;border-top:1px solid #262b35}
+.scene img,.ph{width:240px;aspect-ratio:16/9;object-fit:cover;background:#fff;border-radius:6px}.ph{display:flex;align-items:center;justify-content:center;color:#555;font-size:13px}
+.st-failed{color:var(--bad)}.st-completed{color:var(--ok)}.mut{color:var(--mut);font-size:13px}
+textarea,input[type=number]{background:#0f1115;color:var(--fg);border:1px solid #333;border-radius:6px;padding:6px;width:100%}input[type=number]{width:90px}
+pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:auto;font-size:12px}
+#pv{position:relative;background:#fff;aspect-ratio:16/9;max-width:720px}#pv img{width:100%;height:100%;object-fit:contain}
+#sub{position:absolute;bottom:6%;left:5%;right:5%;text-align:center;color:#fff;text-shadow:0 0 4px #000,0 0 4px #000;font-size:18px}
+</style></head><body>
+<h1>🎙️ Audio → Video de YouTube</h1><div id="health" class="mut"></div>
+<div class="card row"><input type="file" id="f" accept=".wav,.mp3,.m4a,.mp4" hidden>
+<button onclick="f.click()">UPLOAD AUDIO</button><span id="fn" class="mut">Ningún archivo</span>
+<button id="gen" disabled onclick="go()">GENERATE</button></div>
+<div id="proj" hidden>
+ <div class="card"><div class="row"><b id="pn"></b><span class="mut" id="pd"></span></div>
+ <div class="steps row" id="steps" style="margin-top:10px"></div><div id="err" class="st-failed"></div><pre id="log"></pre></div>
+ <div class="card" id="pvc" hidden><div id="pv"><img id="pi"><div id="sub"></div></div><audio id="au" controls style="width:100%;max-width:720px;margin-top:8px"></audio></div>
+ <div class="card"><div class="row"><b>Escenas</b><button id="rb" onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
+</div>
+<script>
+let P=null,T=null,S=['Transcribing','Analyzing narration','Creating scene plan','Generating images','Rendering video','Completed'];
+const $=id=>document.getElementById(id),tc=x=>`${Math.floor(x/60)}:${String(Math.floor(x%60)).padStart(2,'0')}`;
+const api=async(u,o={})=>{const r=await fetch('/api'+u,{...o,headers:o.body&&!(o.body instanceof FormData)?{'Content-Type':'application/json'}:{}});const j=await r.json();if(!r.ok)throw new Error(j.error);return j};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+api('/health').then(h=>$('health').textContent=`FFmpeg: ${h.ffmpeg?'✓':'✗ NO ENCONTRADO (instálalo o define FFMPEG_PATH)'} · OpenAI key: ${h.openai?'✓':'✗ falta en .env'}`);
+$('f').onchange=async()=>{const file=$('f').files[0];if(!file)return;$('fn').textContent=file.name+' — subiendo…';
+ const fd=new FormData();fd.append('audio',file);try{const {id}=await api('/projects',{method:'POST',body:fd});P=id;localStorage.p=id;$('gen').disabled=false;await poll();}catch(e){alert(e.message)}};
+async function go(){try{await api(`/projects/${P}/generate`,{method:'POST'});poll()}catch(e){alert(e.message)}}
+async function rend(){$('rb').disabled=true;$('rb').textContent='RENDERING…';try{await api(`/projects/${P}/render`,{method:'POST'})}catch(e){alert(e.message)}$('rb').disabled=false;$('rb').textContent='RENDER VIDEO';poll()}
+async function poll(){if(!P)return;T=await api('/projects/'+P);draw();if(T.running||T.scenes.some(s=>s.status==='generating'))setTimeout(poll,2000)}
+function draw(){$('proj').hidden=false;$('gen').disabled=false;$('fn').textContent=T.name;$('pn').textContent=T.name;$('pd').textContent=`Duración ${tc(T.duration)} · ${T.running?'procesando…':'listo'}`;
+ $('steps').innerHTML=S.map((n,i)=>`<span class="${i+1===T.step?'on':i+1<T.step?'done':''}">STEP ${i+1} · ${n}</span>`).join('');
+ $('err').textContent=T.error||'';$('log').textContent=(T.logs||[]).slice(-25).join('\n');$('log').scrollTop=1e9;
+ if(T.hasVideo){$('dl').hidden=false;$('dl').href=`/files/${P}/output/final_video.mp4?t=${Date.now()}`;$('dl').download='final_video.mp4'}
+ if(!T.plan)return;$('pvc').hidden=false;if(!$('au').src)$('au').src=`/files/${P}/audio/${T.audioFile}`;
+ if(document.activeElement?.tagName==='TEXTAREA'||document.activeElement?.tagName==='INPUT')return;
+ $('sc').innerHTML=T.plan.scenes.map(sc=>{const e=T.scenes.find(x=>x.scene_id===sc.scene_id)||{};
+  return `<div class="scene"><div>${e.file?`<img src="/files/${P}/${e.file}?t=${e.timestamp||''}">`:`<div class="ph">${e.status||'pending'}</div>`}</div>
+  <div><div class="mut">#${sc.scene_id} · <span class="st-${e.status}">${e.status||'pending'}${e.retry_count?` (retry ${e.retry_count})`:''}</span> ${e.error?'· '+esc(e.error):''}</div>
+  <div class="row">start <input type="number" step="0.1" id="s${sc.scene_id}" value="${sc.start}"> end <input type="number" step="0.1" id="e${sc.scene_id}" value="${sc.end}"><span class="mut">${tc(sc.start)}–${tc(sc.end)}</span></div>
+  <p>“${esc(sc.narration)}”</p><div class="mut">${esc(sc.visual_concept)}</div>
+  <textarea id="p${sc.scene_id}" rows="3">${esc(sc.prompt)}</textarea>
+  <div class="row" style="margin-top:6px"><button class="g" onclick="edit(${sc.scene_id},false)">EDIT PROMPT</button><button onclick="edit(${sc.scene_id},true)">REGENERATE</button>
+  <button class="g" onclick="act(${sc.scene_id},'duplicate')">DUPLICATE</button><button class="d" onclick="act(${sc.scene_id},'del')">DELETE</button></div></div></div>`}).join('')}
+async function edit(id,regen){try{await api(`/projects/${P}/scenes/${id}`,{method:'PUT',body:JSON.stringify({prompt:$('p'+id).value,start:$('s'+id).value,end:$('e'+id).value})});
+ if(regen)await api(`/projects/${P}/scenes/${id}/regenerate`,{method:'POST'});}catch(e){alert(e.message)}poll()}
+async function act(id,a){try{if(a==='del'){if(!confirm('¿Borrar escena?'))return;await api(`/projects/${P}/scenes/${id}`,{method:'DELETE'})}else await api(`/projects/${P}/scenes/${id}/duplicate`,{method:'POST'})}catch(e){alert(e.message)}poll()}
+// Preview: misma regla que el render (la escena activa es la última cuyo start <= t). Bucle rAF para cambio exacto.
+function tick(){const a=$('au');if(T?.plan){const t=a.currentTime,L=T.plan.scenes;let sc=L[0];for(const s of L){if(s.start<=t)sc=s}
+ const e=T.scenes.find(x=>x.scene_id===sc.scene_id);if(e?.file){const u=`/files/${P}/${e.file}?t=${e.timestamp||''}`;if($('pi').dataset.u!==u){$('pi').dataset.u=u;$('pi').src=u}}
+ const g=T.subs.find(s=>t>=s.start&&t<s.end);$('sub').textContent=g?g.text:''}
+ requestAnimationFrame(tick)}
+requestAnimationFrame(tick);
+if(localStorage.p){P=localStorage.p;poll().catch(()=>{P=null})}
+</script></body></html>
