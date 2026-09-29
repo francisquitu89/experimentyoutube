@@ -12,43 +12,68 @@ button.g{background:#2a2f3a}button.d{background:#3a2226}button:disabled{opacity:
 .st-failed{color:var(--bad)}.st-completed{color:var(--ok)}.mut{color:var(--mut);font-size:13px}
 textarea,input[type=number]{background:#0f1115;color:var(--fg);border:1px solid #333;border-radius:6px;padding:6px;width:100%}input[type=number]{width:90px}
 pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:auto;font-size:12px}
+#health{font-size:13px;line-height:1.7}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:#fbbf24}
+.banner{border-radius:10px;padding:10px 14px;margin:10px 0;font-size:14px}.banner.info{background:#1c2a44}.banner.warn{background:#3d3210;color:#fde68a}
+.kpi{display:flex;gap:28px;flex-wrap:wrap}.kpi div{font-size:12px;color:var(--mut)}.kpi b{display:block;font-size:22px;color:var(--fg)}
 #pv{position:relative;background:#fff;aspect-ratio:16/9;max-width:720px}#pv img{width:100%;height:100%;object-fit:contain}
 #sub{position:absolute;bottom:6%;left:5%;right:5%;text-align:center;color:#fff;text-shadow:0 0 4px #000,0 0 4px #000;font-size:18px}
 </style></head><body>
-<h1>🎙️ Audio → Video de YouTube</h1><div id="health" class="mut"></div>
+<h1>🎙️ Audio → Video de YouTube</h1>
+<div class="card"><div class="row"><b>Estado del sistema</b><button class="g" onclick="health()">RE-CHECK</button></div><div id="health" class="mut">Comprobando…</div></div>
 <div class="card row"><input type="file" id="f" accept=".wav,.mp3,.m4a,.mp4" hidden>
 <button onclick="f.click()">UPLOAD AUDIO</button><span id="fn" class="mut">Ningún archivo</span>
-<button id="gen" disabled onclick="go()">GENERATE</button></div>
+<button id="gen" disabled onclick="analyze()">ANALYZE</button>
+<button id="gimg" disabled onclick="genImgs()">GENERATE IMAGES</button></div>
 <div id="proj" hidden>
  <div class="card"><div class="row"><b id="pn"></b><span class="mut" id="pd"></span></div>
  <div class="steps row" id="steps" style="margin-top:10px"></div><div id="err" class="st-failed"></div><pre id="log"></pre></div>
+ <div class="card" id="sumc" hidden><b>Scene plan — revisión</b><div id="sum" style="margin-top:10px"></div></div>
  <div class="card" id="pvc" hidden><div id="pv"><img id="pi"><div id="sub"></div></div><audio id="au" controls style="width:100%;max-width:720px;margin-top:8px"></audio></div>
- <div class="card"><div class="row"><b>Escenas</b><button id="rb" onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
+ <div class="card"><div class="row"><b>Escenas</b><button id="rb" disabled onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
 </div>
 <script>
-let P=null,T=null,S=['Transcribing','Analyzing narration','Creating scene plan','Generating images','Rendering video','Completed'];
+let P=null,T=null,S=['Upload','Transcribe','Analyze','Review plan','Generate images','Render video'];
 const $=id=>document.getElementById(id),tc=x=>`${Math.floor(x/60)}:${String(Math.floor(x%60)).padStart(2,'0')}`;
-const api=async(u,o={})=>{const r=await fetch('/api'+u,{...o,headers:o.body&&!(o.body instanceof FormData)?{'Content-Type':'application/json'}:{}});const j=await r.json();if(!r.ok)throw new Error(j.error);return j};
+const api=async(u,o={})=>{const r=await fetch('/api'+u,{...o,headers:o.body&&!(o.body instanceof FormData)?{'Content-Type':'application/json'}:{}});const j=await r.json();if(!r.ok){const e=new Error(j.error);e.code=j.code;throw e}return j};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-api('/health').then(h=>$('health').textContent=`FFmpeg: ${h.ffmpeg?'✓':'✗ NO ENCONTRADO (instálalo o define FFMPEG_PATH)'} · OpenAI key: ${h.openai?'✓':'✗ falta en .env'}`);
+const mark=(ok,t,extra)=>`<div><span class="${ok===true?'ok':ok===false?'bad':'warn'}">${ok===true?'✓':ok===false?'✗':'?'}</span> ${esc(t)}${extra?` <span class="mut">${esc(extra)}</span>`:''}</div>`;
+async function health(){$('health').textContent='Comprobando…';try{const h=await api('/health'),o=h.openai,m=o.models||{};
+ $('health').innerHTML=mark(h.ffmpeg.ok,'FFmpeg',h.ffmpeg.ok?'':h.ffmpeg.help)+mark(h.ffprobe.ok,'FFprobe',h.ffprobe.ok?'':h.ffprobe.help)
+  +mark(o.configured,'OPENAI_API_KEY configurada',o.configured?'':'falta en .env')
+  +(o.configured?mark(o.connection.ok,'Conexión con OpenAI',o.connection.error):'')
+  +[['reasoning','Modelo de razonamiento'],['transcription','Modelo de transcripción'],['image','Modelo de imagen'],['timestamps_fallback','Modelo timestamps (fallback)']].filter(([k])=>m[k])
+    .map(([k,n])=>mark(m[k].available,`${n}: ${m[k].id}`,m[k].available===true?'disponible':m[k].error)).join('')
+  +`<div class="mut">Límite MAX_SCENES=${h.maxScenes} · imágenes ${esc(h.imageSettings.size)} (${esc(h.imageSettings.quality)})${o.note?' · '+esc(o.note):''}</div>`}catch(e){$('health').innerHTML=mark(false,'No se pudo consultar /api/health',e.message)}}
+health();
 $('f').onchange=async()=>{const file=$('f').files[0];if(!file)return;$('fn').textContent=file.name+' — subiendo…';
- const fd=new FormData();fd.append('audio',file);try{const {id}=await api('/projects',{method:'POST',body:fd});P=id;localStorage.p=id;$('gen').disabled=false;await poll();}catch(e){alert(e.message)}};
-async function go(){try{await api(`/projects/${P}/generate`,{method:'POST'});poll()}catch(e){alert(e.message)}}
-async function rend(){$('rb').disabled=true;$('rb').textContent='RENDERING…';try{await api(`/projects/${P}/render`,{method:'POST'})}catch(e){alert(e.message)}$('rb').disabled=false;$('rb').textContent='RENDER VIDEO';poll()}
-async function poll(){if(!P)return;T=await api('/projects/'+P);draw();if(T.running||T.scenes.some(s=>s.status==='generating'))setTimeout(poll,2000)}
-function draw(){$('proj').hidden=false;$('gen').disabled=false;$('fn').textContent=T.name;$('pn').textContent=T.name;$('pd').textContent=`Duración ${tc(T.duration)} · ${T.running?'procesando…':'listo'}`;
- $('steps').innerHTML=S.map((n,i)=>`<span class="${i+1===T.step?'on':i+1<T.step?'done':''}">STEP ${i+1} · ${n}</span>`).join('');
+ const fd=new FormData();fd.append('audio',file);try{const {id}=await api('/projects',{method:'POST',body:fd});P=id;localStorage.p=id;await poll();}catch(e){$('fn').textContent='Error al subir';alert(e.message)}};
+async function analyze(){try{await api(`/projects/${P}/analyze`,{method:'POST'});poll()}catch(e){alert(e.message)}}
+async function genImgs(){const sm=T.summary;let body;
+ if(sm.overLimit){if(!confirm(`⚠ El plan tiene ${sm.scenes} escenas y el límite MAX_SCENES es ${sm.maxScenes}.\nSe generarán ${sm.imagesToGenerate} imágenes con ${sm.model} y el coste puede ser alto.\n¿Generar de todos modos?`))return;body=JSON.stringify({confirmOverLimit:true})}
+ try{await api(`/projects/${P}/generate-images`,{method:'POST',body});poll()}catch(e){alert(e.message)}}
+async function rend(){$('rb').disabled=true;$('rb').textContent='RENDERING…';try{await api(`/projects/${P}/render`,{method:'POST'})}catch(e){alert(e.message)}$('rb').textContent='RENDER VIDEO';poll()}
+async function poll(){if(!P)return;T=await api('/projects/'+P);draw();if(T.running)setTimeout(poll,2000)}
+function draw(){const sm=T.summary,busy=T.running;$('proj').hidden=false;$('fn').textContent=T.name;$('pn').textContent=T.name;
+ $('pd').textContent=`Duración ${tc(T.duration)} · ${busy?'procesando…':T.plan?'listo':'sin analizar'}`;
+ const step=T.step||1;$('steps').innerHTML=S.map((n,i)=>`<span class="${i+1===step?'on':i+1<step?'done':''}">STEP ${i+1} · ${n}</span>`).join('');
  $('err').textContent=T.error||'';$('log').textContent=(T.logs||[]).slice(-25).join('\n');$('log').scrollTop=1e9;
+ $('gen').disabled=busy||!!T.plan;$('gen').textContent=T.plan?'ANALYZED ✓':'ANALYZE';
+ $('gimg').disabled=busy||!sm||sm.imagesToGenerate===0;$('gimg').textContent=sm?(sm.imagesToGenerate?`GENERATE IMAGES (${sm.imagesToGenerate})`:'IMAGES ✓'):'GENERATE IMAGES';
+ $('rb').disabled=busy||!sm||sm.imagesToGenerate>0;
  if(T.hasVideo){$('dl').hidden=false;$('dl').href=`/files/${P}/output/final_video.mp4?t=${Date.now()}`;$('dl').download='final_video.mp4'}
+ $('sumc').hidden=!sm;
+ if(sm){$('sum').innerHTML=`<div class="kpi"><div><b>${tc(sm.duration)}</b>duración</div><div><b>${sm.scenes}</b>escenas</div><div><b>${sm.imagesToGenerate}</b>imágenes por generar</div><div><b>${sm.imagesCompleted}</b>ya generadas</div><div><b>${esc(sm.model)}</b>${esc(sm.size)} · ${esc(sm.quality)}</div></div>`
+  +(sm.overLimit?`<div class="banner warn">⚠ El plan tiene ${sm.scenes} escenas, por encima del límite MAX_SCENES=${sm.maxScenes}. Al pulsar GENERATE IMAGES se te pedirá confirmación. Puedes borrar escenas antes.</div>`:'')
+  +(!T.imagesApproved?`<div class="banner info">Revisión: todavía <b>no se ha generado ninguna imagen</b> ni se ha gastado nada en imágenes. Edita prompts, tiempos o escenas y pulsa GENERATE IMAGES cuando estés conforme.</div>`:'')}
  if(!T.plan)return;$('pvc').hidden=false;if(!$('au').src)$('au').src=`/files/${P}/audio/${T.audioFile}`;
  if(document.activeElement?.tagName==='TEXTAREA'||document.activeElement?.tagName==='INPUT')return;
  $('sc').innerHTML=T.plan.scenes.map(sc=>{const e=T.scenes.find(x=>x.scene_id===sc.scene_id)||{};
   return `<div class="scene"><div>${e.file?`<img src="/files/${P}/${e.file}?t=${e.timestamp||''}">`:`<div class="ph">${e.status||'pending'}</div>`}</div>
   <div><div class="mut">#${sc.scene_id} · <span class="st-${e.status}">${e.status||'pending'}${e.retry_count?` (retry ${e.retry_count})`:''}</span> ${e.error?'· '+esc(e.error):''}</div>
-  <div class="row">start <input type="number" step="0.1" id="s${sc.scene_id}" value="${sc.start}"> end <input type="number" step="0.1" id="e${sc.scene_id}" value="${sc.end}"><span class="mut">${tc(sc.start)}–${tc(sc.end)}</span></div>
-  <p>“${esc(sc.narration)}”</p><div class="mut">${esc(sc.visual_concept)}</div>
+  <div class="row">start <input type="number" step="0.1" id="s${sc.scene_id}" value="${sc.start}"> end <input type="number" step="0.1" id="e${sc.scene_id}" value="${sc.end}"><span class="mut">${tc(sc.start)}–${tc(sc.end)} · ${(sc.end-sc.start).toFixed(1)} s</span></div>
+  <p>“${esc(sc.narration)}”</p><div class="mut"><b>Concepto:</b> ${esc(sc.visual_concept)}${sc.visual_reason?` — ${esc(sc.visual_reason)}`:''}</div>
   <textarea id="p${sc.scene_id}" rows="3">${esc(sc.prompt)}</textarea>
-  <div class="row" style="margin-top:6px"><button class="g" onclick="edit(${sc.scene_id},false)">EDIT PROMPT</button><button onclick="edit(${sc.scene_id},true)">REGENERATE</button>
+  <div class="row" style="margin-top:6px"><button class="g" onclick="edit(${sc.scene_id},false)">EDIT PROMPT</button><button onclick="edit(${sc.scene_id},true)" ${T.imagesApproved&&!busy?'':'disabled title="Disponible después de GENERATE IMAGES"'}>REGENERATE</button>
   <button class="g" onclick="act(${sc.scene_id},'duplicate')">DUPLICATE</button><button class="d" onclick="act(${sc.scene_id},'del')">DELETE</button></div></div></div>`}).join('')}
 async function edit(id,regen){try{await api(`/projects/${P}/scenes/${id}`,{method:'PUT',body:JSON.stringify({prompt:$('p'+id).value,start:$('s'+id).value,end:$('e'+id).value})});
  if(regen)await api(`/projects/${P}/scenes/${id}/regenerate`,{method:'POST'});}catch(e){alert(e.message)}poll()}

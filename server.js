@@ -9,8 +9,20 @@ import { randomUUID } from 'crypto';
 
 const ROOT = path.resolve('projects');
 fs.mkdirSync(ROOT, { recursive: true });
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
-const FFPROBE = process.env.FFMPEG_PATH ? path.join(path.dirname(process.env.FFMPEG_PATH), 'ffprobe') : 'ffprobe';
+// ---------- herramientas externas ----------
+// FFMPEG_PATH puede ser la ruta a ffmpeg(.exe) o a la carpeta que lo contiene. ffprobe se busca en la misma carpeta
+// (o en FFPROBE_PATH si se define). Sin FFMPEG_PATH se usan "ffmpeg" y "ffprobe" del PATH.
+const exe = (n) => (process.platform === 'win32' ? `${n}.exe` : n);
+const asFile = (p, name) => { try { if (fs.statSync(p).isDirectory()) return path.join(p, exe(name)); } catch {} return p; };
+const FFMPEG = process.env.FFMPEG_PATH ? asFile(process.env.FFMPEG_PATH, 'ffmpeg') : 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH ? asFile(process.env.FFPROBE_PATH, 'ffprobe')
+  : process.env.FFMPEG_PATH ? path.join(path.dirname(FFMPEG), exe('ffprobe')) : 'ffprobe';
+const MAX_SCENES = Math.max(1, parseInt(process.env.MAX_SCENES, 10) || 50);
+
+// ---------- seguridad: nunca exponer la API key ----------
+const KEY = process.env.OPENAI_API_KEY || '';
+const redact = (x) => { let t = String(x ?? ''); if (KEY) t = t.split(KEY).join('[REDACTED]');
+  return t.replace(/sk-[A-Za-z0-9_\-*.]{6,}/g, 'sk-[REDACTED]').replace(/Bearer\s+[A-Za-z0-9_\-.]+/g, 'Bearer [REDACTED]'); };
 const M = {
   tr: process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-transcribe',
   // Según la doc oficial, timestamp_granularities SOLO existe para whisper-1.
@@ -20,7 +32,7 @@ const M = {
 };
 const IMG_SIZE = process.env.OPENAI_IMAGE_SIZE || '2048x1152'; // 16:9 exacto, lados múltiplos de 16 (gpt-image-2)
 const IMG_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
-const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const openai = KEY ? new OpenAI({ apiKey: KEY }) : null;
 
 const STYLE = {
   visual_style: 'Deliberately crude amateur drawing, as if made in 2 minutes in MS Paint by a total beginner using a mouse. Funny, naive, intentionally bad',
@@ -40,7 +52,7 @@ const rd = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const load = (id) => rd(sfile(id));
 const save = (id, s) => fs.writeFileSync(sfile(id), JSON.stringify(s, null, 2));
 const log = (id, msg) => {
-  const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+  const line = `[${new Date().toISOString().slice(11, 19)}] ${redact(msg)}`;
   console.log(line);
   try { const s = load(id); s.logs = [...(s.logs || []).slice(-200), line]; save(id, s); } catch {}
 };
@@ -52,6 +64,21 @@ const run = (cmd, args, opts = {}) => new Promise((res, rej) => {
   p.on('close', (c) => (c === 0 ? res() : rej(new Error(err.slice(-800)))));
 });
 const ffmpegOk = () => spawnSync(FFMPEG, ['-version']).status === 0;
+const ffprobeOk = () => spawnSync(FFPROBE, ['-version']).status === 0;
+const FFPROBE_HELP = `FFprobe no encontrado (se intentó ejecutar: ${FFPROBE}). FFprobe viene incluido en FFmpeg y debe estar en la misma carpeta que ffmpeg. `
+  + 'Solución: en .env define FFMPEG_PATH con la ruta completa a ffmpeg.exe (sin comillas), por ejemplo '
+  + 'FFMPEG_PATH=C:\\Users\\<usuario>\\AppData\\Local\\ffmpeg\\<carpeta>\\bin\\ffmpeg.exe ; ffprobe.exe se busca en esa misma carpeta bin. '
+  + 'Si está en otra ubicación, usa FFPROBE_PATH. Después reinicia el servidor.';
+const FFMPEG_HELP = `FFmpeg no encontrado (se intentó ejecutar: ${FFMPEG}). Instálalo (Windows: winget install ffmpeg | macOS: brew install ffmpeg | Linux: apt install ffmpeg) o define FFMPEG_PATH en .env con la ruta a ffmpeg.exe.`;
+const assertTools = () => { if (!ffmpegOk()) throw new Error(FFMPEG_HELP); if (!ffprobeOk()) throw new Error(FFPROBE_HELP); };
+// La duración es imprescindible (recorta el último plano y valida el plan): si FFprobe falla, se aborta con error explícito.
+function audioDuration(file) {
+  if (!ffprobeOk()) throw new Error(FFPROBE_HELP);
+  const r = spawnSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+  const d = parseFloat(String(r.stdout || '').trim());
+  if (r.status !== 0 || !isFinite(d) || d <= 0) throw new Error(`FFprobe no pudo leer la duración de ${path.basename(file)}: ${redact(String(r.stderr || '').trim().slice(-300)) || 'salida vacía'}. ¿El archivo está dañado o no es audio?`);
+  return d;
+}
 const running = new Set();
 
 // ---------- pipeline ----------
@@ -168,33 +195,61 @@ async function genImage(id, sid) {
       return;
     } catch (e) {
       log(id, `[IMAGE ${pad(sid)}] Error: ${e.message}`);
-      patch(id, (s) => { const x = s.scenes.find((y) => y.scene_id === sid); x.error = e.message; x.status = attempt === 3 ? 'failed' : 'pending'; });
+      patch(id, (s) => { const x = s.scenes.find((y) => y.scene_id === sid); x.error = redact(e.message); x.status = attempt === 3 ? 'failed' : 'pending'; });
     }
   }
 }
 
-async function generate(id) {
+// Etapa 1: TRANSCRIBE + ANALYZE. Nunca genera imágenes. Reanudable: si transcript.json / scene_plan.json ya existen, no se repiten.
+// step: 1 upload · 2 transcribiendo · 3 analizando · 4 REVISIÓN del plan (espera al usuario) · 5 imágenes · 6 render · 7 completado
+async function analyze(id) {
   if (running.has(id)) return;
+  if (fs.existsSync(path.join(pdir(id), 'scene_plan.json'))) { log(id, '[ANALYZE] Ya completado: se reutiliza el plan existente (0 llamadas a OpenAI)'); return; }
   running.add(id);
   try {
     if (!openai) throw new Error('Falta OPENAI_API_KEY en .env');
-    patch(id, (s) => { s.step = 1; s.error = null; });
+    patch(id, (s) => { s.step = 2; s.error = null; });
     const t = await transcribe(id);
     patch(id, (s) => { s.step = 3; });
     await planScenes(id, t);
     patch(id, (s) => { s.step = 4; });
+    log(id, '[REVIEW] Plan listo. Revísalo y pulsa GENERATE IMAGES cuando quieras gastar en imágenes.');
+  } catch (e) {
+    log(id, `[ERROR] ${e.message}`);
+    patch(id, (s) => { s.error = redact(e.message); });
+  } finally { running.delete(id); }
+}
+
+// Resumen del plan para la pantalla de revisión (siempre calculado en vivo desde scene_plan.json + state.json)
+function summarize(id) {
+  const pf = path.join(pdir(id), 'scene_plan.json'); if (!fs.existsSync(pf)) return null;
+  const s = load(id), plan = rd(pf);
+  const done = (sc) => { const e = (s.scenes || []).find((x) => x.scene_id === sc.scene_id); return e?.status === 'completed' && e.file && fs.existsSync(path.join(pdir(id), e.file)); };
+  const scenes = plan.scenes.length, completed = plan.scenes.filter(done).length;
+  return { duration: s.duration, scenes, imagesToGenerate: scenes - completed, imagesCompleted: completed,
+    maxScenes: MAX_SCENES, overLimit: scenes > MAX_SCENES, model: M.im, size: IMG_SIZE, quality: IMG_QUALITY };
+}
+
+// Etapa 2: GENERATE IMAGES. Sólo se ejecuta si el usuario la pide explícitamente (POST /generate-images).
+async function generateImages(id) {
+  if (running.has(id)) return;
+  running.add(id);
+  try {
+    if (!openai) throw new Error('Falta OPENAI_API_KEY en .env');
+    patch(id, (s) => { s.step = 5; s.error = null; });
     // reanudable: sólo escenas no completadas (los "generating" huérfanos vuelven a pending)
     for (const e of load(id).scenes) if (e.status !== 'completed' || !e.file || !fs.existsSync(path.join(pdir(id), e.file))) await genImage(id, e.scene_id);
     const failed = load(id).scenes.filter((x) => x.status === 'failed').length;
     patch(id, (s) => { s.step = 5; s.error = failed ? `${failed} escena(s) fallaron. Usa REGENERATE.` : null; });
+    log(id, failed ? `[IMAGES] Terminado con ${failed} fallo(s)` : '[IMAGES] Todas las imágenes completadas. Ya puedes hacer RENDER VIDEO.');
   } catch (e) {
     log(id, `[ERROR] ${e.message}`);
-    patch(id, (s) => { s.error = e.message; });
+    patch(id, (s) => { s.error = redact(e.message); });
   } finally { running.delete(id); }
 }
 
 async function render(id) {
-  if (!ffmpegOk()) throw new Error('FFmpeg no encontrado. Instálalo (Windows: winget install ffmpeg | macOS: brew install ffmpeg | Linux: apt install ffmpeg) o define FFMPEG_PATH en .env');
+  if (!ffmpegOk()) throw new Error(FFMPEG_HELP);
   const dir = pdir(id), s = load(id), plan = rd(path.join(dir, 'scene_plan.json'));
   const missing = plan.scenes.filter((sc) => { const e = s.scenes.find((x) => x.scene_id === sc.scene_id); return !e || e.status !== 'completed'; });
   if (missing.length) throw new Error(`Faltan imágenes en escenas: ${missing.map((x) => x.scene_id).join(', ')}`);
@@ -219,15 +274,17 @@ async function render(id) {
 }
 
 async function newProject(srcPath, name, ext = path.extname(srcPath).toLowerCase()) {
+  assertTools(); // FFmpeg y FFprobe deben existir ANTES de crear nada
   const id = randomUUID().slice(0, 8), dir = pdir(id);
-  for (const d of ['audio', 'transcript', 'scenes', 'output']) fs.mkdirSync(path.join(dir, d), { recursive: true });
-  const audioFile = 'narration' + (ext === '.mp4' ? '.m4a' : ext);
-  const dest = path.join(dir, 'audio', audioFile);
-  if (ext === '.mp4') await run(FFMPEG, ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', dest]); else fs.copyFileSync(srcPath, dest);
+  try {
+    for (const d of ['audio', 'transcript', 'scenes', 'output']) fs.mkdirSync(path.join(dir, d), { recursive: true });
+    const audioFile = 'narration' + (ext === '.mp4' ? '.m4a' : ext);
+    const dest = path.join(dir, 'audio', audioFile);
+    if (ext === '.mp4') await run(FFMPEG, ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', dest]); else fs.copyFileSync(srcPath, dest);
+    const duration = audioDuration(dest); // lanza error explícito si FFprobe falla: no se crea un proyecto con duración 0
+    save(id, { id, name, audioFile, duration, step: 1, scenes: [], logs: [] });
+  } catch (e) { fs.rmSync(dir, { recursive: true, force: true }); throw e; }
   try { fs.unlinkSync(srcPath); } catch {}
-  const pr = spawnSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', dest]);
-  const duration = parseFloat(pr.stdout.toString()) || 0;
-  save(id, { id, name, audioFile, duration, step: 0, scenes: [], logs: [] });
   return id;
 }
 
@@ -236,31 +293,90 @@ const app = express();
 app.use(express.json());
 const upload = multer({ dest: path.join(ROOT, '_tmp'), limits: { fileSize: 500 * 1024 * 1024 } });
 const OKEXT = ['.wav', '.mp3', '.m4a', '.mp4'];
-const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => res.status(400).json({ error: e.message }));
+const httpErr = (msg, http = 400, code, extra) => Object.assign(new Error(msg), { http, code, extra });
+// fn(req,res) puede lanzar de forma síncrona (ej. los guardias con httpErr) o devolver una promesa que rechace;
+// el try/catch cubre el caso síncrono y el .catch() el asíncrono. Sin el try/catch, un throw síncrono no lo
+// captura Promise.resolve(fn(...)) porque el throw ocurre antes de llamarlo, y Express respondía HTML de error.
+const sendErr = (res, e) => res.status(e.http || 400).json({ error: redact(e.message), code: e.code, ...(e.extra || {}) });
+const wrap = (fn) => (req, res) => { try { Promise.resolve(fn(req, res)).catch((e) => sendErr(res, e)); } catch (e) { sendErr(res, e); } };
 
-app.get('/api/health', (_q, res) => res.json({ ffmpeg: ffmpegOk(), openai: !!openai, models: M }));
+// ---------- health check (usa la API key real; jamás la devuelve) ----------
+const explain = (e) => {
+  if (e?.status === 401) return 'La API key fue rechazada (401). Revisa OPENAI_API_KEY en .env.';
+  if (e?.status === 403) return 'Sin permiso (403): la key/proyecto no tiene acceso a este recurso.';
+  if (e?.status === 404) return 'No existe o tu cuenta/proyecto no tiene acceso (404).';
+  if (e?.status === 429) return 'Límite de uso o saldo agotado (429).';
+  if (!e?.status) return `Sin conexión con la API de OpenAI: ${redact(e?.message || e)}`;
+  return `Error ${e.status}: ${redact(e.message).slice(0, 200)}`;
+};
+async function openaiHealth() {
+  if (!openai) return { ok: false, configured: false, connection: { ok: false, error: 'Falta OPENAI_API_KEY en .env' }, models: {} };
+  const opt = { timeout: 10000, maxRetries: 0 };
+  const connection = await openai.models.list(opt).then(() => ({ ok: true }), (e) => ({ ok: false, status: e.status ?? null, error: explain(e) }));
+  const roles = { reasoning: M.re, transcription: M.tr, image: M.im };
+  if (M.ts !== M.tr) roles.timestamps_fallback = M.ts;
+  const models = {};
+  // Con 401 o sin red, comprobar cada modelo no aporta nada. Un 403 en "list" sólo indica una key restringida: se sigue probando cada modelo.
+  const skip = !connection.ok && (connection.status === 401 || connection.status === null);
+  await Promise.all(Object.entries(roles).map(async ([role, id]) => {
+    if (skip) { models[role] = { id, available: null, error: 'No comprobado (falla la conexión o la key)' }; return; }
+    models[role] = await openai.models.retrieve(id, opt).then(() => ({ id, available: true }),
+      (e) => ({ id, available: e.status === 403 ? null : false, error: explain(e) }));
+  }));
+  const critical = ['reasoning', 'transcription', 'image'];
+  return { ok: connection.ok && critical.every((r) => models[r].available === true), configured: true, connection, models,
+    note: 'Comprobación gratuita (models.retrieve): confirma que el modelo existe y es visible para tu key. No prueba límites de uso ni verificación de organización para imágenes.' };
+}
+app.get('/api/health', wrap(async (_q, res) => {
+  const fm = ffmpegOk(), fp = ffprobeOk();
+  res.json({ ffmpeg: { ok: fm, command: FFMPEG, ...(fm ? {} : { help: FFMPEG_HELP }) }, ffprobe: { ok: fp, command: FFPROBE, ...(fp ? {} : { help: FFPROBE_HELP }) },
+    openai: await openaiHealth(), maxScenes: MAX_SCENES, imageSettings: { size: IMG_SIZE, quality: IMG_QUALITY } });
+}));
 app.get('/api/projects', (_q, res) => res.json(fs.readdirSync(ROOT).filter((d) => fs.existsSync(sfile(d))).map((d) => { const s = load(d); return { id: d, name: s.name }; })));
 
 app.post('/api/projects', upload.single('audio'), wrap(async (req, res) => {
   const f = req.file; if (!f) throw new Error('No se recibió archivo');
-  const ext = path.extname(f.originalname).toLowerCase();
-  if (!OKEXT.includes(ext)) { fs.unlinkSync(f.path); throw new Error(`Formato no permitido (${OKEXT.join(', ')})`); }
-  if (!ffmpegOk()) { fs.unlinkSync(f.path); throw new Error('FFmpeg no encontrado. Instálalo o define FFMPEG_PATH en .env'); }
-  const id = await newProject(f.path, f.originalname, ext);
-  res.json({ id });
+  try {
+    const ext = path.extname(f.originalname).toLowerCase();
+    if (!OKEXT.includes(ext)) throw new Error(`Formato no permitido (${OKEXT.join(', ')})`);
+    res.json({ id: await newProject(f.path, f.originalname, ext) }); // newProject valida FFmpeg + FFprobe y la duración
+  } catch (e) { try { fs.unlinkSync(f.path); } catch {} throw e; }
 }));
 
 app.get('/api/projects/:id', wrap((req, res) => {
   const s = load(req.params.id);
   const pf = path.join(pdir(s.id), 'scene_plan.json'), tf = path.join(pdir(s.id), 'transcript', 'transcript.json');
-  res.json({ ...s, running: running.has(s.id), plan: fs.existsSync(pf) ? rd(pf) : null,
+  res.json({ ...s, running: running.has(s.id), plan: fs.existsSync(pf) ? rd(pf) : null, summary: summarize(s.id),
     subs: fs.existsSync(tf) ? rd(tf).segments : [], hasVideo: fs.existsSync(path.join(pdir(s.id), 'output', 'final_video.mp4')) });
 }));
 
-app.post('/api/projects/:id/generate', wrap((req, res) => { generate(req.params.id); res.json({ ok: true }); }));
+// UPLOAD → TRANSCRIBE → ANALYZE → (revisión del usuario). Esta ruta NUNCA genera imágenes.
+app.post('/api/projects/:id/analyze', wrap((req, res) => {
+  load(req.params.id);
+  if (!openai) throw httpErr('Falta OPENAI_API_KEY en .env');
+  if (running.has(req.params.id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  analyze(req.params.id); res.json({ ok: true });
+}));
+// GENERATE IMAGES: sólo tras el plan y sólo por petición explícita. Si el plan supera MAX_SCENES exige confirmOverLimit=true.
+app.post('/api/projects/:id/generate-images', wrap((req, res) => {
+  const id = req.params.id; load(id);
+  const sum = summarize(id);
+  if (!sum) throw httpErr('Primero ejecuta ANALYZE: todavía no hay scene plan que revisar.', 409, 'no_plan');
+  if (!openai) throw httpErr('Falta OPENAI_API_KEY en .env');
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  if (sum.overLimit && !req.body?.confirmOverLimit)
+    throw httpErr(`El plan tiene ${sum.scenes} escenas y el límite MAX_SCENES es ${sum.maxScenes}. Confirma para generar de todos modos.`, 409, 'over_limit', { scenes: sum.scenes, maxScenes: sum.maxScenes });
+  if (!sum.imagesToGenerate) return res.json({ ok: true, started: false, message: 'Todas las imágenes ya están generadas' });
+  patch(id, (s) => { s.imagesApproved = true; });
+  generateImages(id); res.json({ ok: true, started: true, images: sum.imagesToGenerate });
+}));
 app.post('/api/projects/:id/render', wrap(async (req, res) => {
-  patch(req.params.id, (s) => { s.step = 5; });
-  await render(req.params.id); patch(req.params.id, (s) => { s.step = 6; }); res.json({ ok: true });
+  const id = req.params.id; load(id);
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  running.add(id);
+  try { patch(id, (s) => { s.step = 6; s.error = null; }); await render(id); patch(id, (s) => { s.step = 7; }); res.json({ ok: true }); }
+  catch (e) { patch(id, (s) => { s.step = 5; }); throw e; }
+  finally { running.delete(id); }
 }));
 
 function editPlan(id, fn) {
@@ -276,7 +392,15 @@ app.put('/api/projects/:id/scenes/:sid', wrap((req, res) => {
     if (isFinite(start)) sc.start = +start; if (isFinite(end)) sc.end = +end; });
   res.json({ ok: true });
 }));
-app.post('/api/projects/:id/scenes/:sid/regenerate', wrap((req, res) => { genImage(req.params.id, +req.params.sid); res.json({ ok: true }); }));
+app.post('/api/projects/:id/scenes/:sid/regenerate', wrap((req, res) => {
+  const id = req.params.id, sid = +req.params.sid;
+  if (!load(id).imagesApproved) throw httpErr('Aún no has pulsado GENERATE IMAGES: no se genera ninguna imagen hasta entonces.', 409, 'not_approved');
+  if (!openai) throw httpErr('Falta OPENAI_API_KEY en .env');
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  running.add(id);
+  genImage(id, sid).catch((e) => log(id, `[ERROR] ${e.message}`)).finally(() => running.delete(id));
+  res.json({ ok: true });
+}));
 app.delete('/api/projects/:id/scenes/:sid', wrap((req, res) => {
   const sid = +req.params.sid;
   editPlan(req.params.id, (p) => { if (p.scenes.length < 2) throw new Error('Debe quedar al menos una escena');
@@ -304,4 +428,4 @@ app.use(express.static('public'));
 const port = process.env.PORT || 3000;
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve('server.js')) app.listen(port, '127.0.0.1', () => console.log(`http://localhost:${port}  ffmpeg=${ffmpegOk()} key=${!!openai}`));
 
-export { STYLE, newProject, transcribe, planScenes, genImage, render, load, pdir, patch, M, IMG_SIZE, ffmpegOk, FFMPEG, run };
+export { app, STYLE, newProject, transcribe, planScenes, analyze, generateImages, summarize, genImage, render, load, pdir, patch, M, IMG_SIZE, MAX_SCENES, ffmpegOk, ffprobeOk, audioDuration, FFMPEG, FFPROBE, run, redact };

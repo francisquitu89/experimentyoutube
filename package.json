@@ -6,7 +6,8 @@
   "start": "node server.js",
   "test:plan": "node test.js plan",
   "test:image": "node test.js image",
-  "test:render": "node test.js render"
+  "test:render": "node test.js render",
+  "test:flow": "node test.js flow"
  },
  "dependencies": {
   "dotenv": "^16.4.5",

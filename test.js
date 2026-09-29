@@ -3,15 +3,19 @@
 //   npm run test:image -- <projectId> [sceneId=1]   una sola escena → gpt-image-2
 //   npm run test:image -- "a stick figure ..."      prompt suelto con el style bible
 //   npm run test:render                             imagen → FFmpeg → MP4 (sin usar la API, coste 0)
+//   npm run test:flow -- audio.wav [segundos=25]    UPLOAD → TRANSCRIBE → ANALYZE → REVIEW por la API HTTP. Usa OpenAI para transcribir y planificar
+//                                                   (céntimos) pero NUNCA genera imágenes: comprueba que todo queda en 'pending'.
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import * as S from './server.js';
 
 const [, , cmd, a, b] = process.argv;
 const sh = (args) => S.run(S.FFMPEG, ['-y', ...args]);
 const show = (o) => console.log(JSON.stringify(o, null, 2));
-if (!S.ffmpegOk()) { console.error('FFmpeg no encontrado: instálalo o define FFMPEG_PATH'); process.exit(1); }
+if (!S.ffmpegOk()) { console.error(`FFmpeg no encontrado (${S.FFMPEG}): instálalo o define FFMPEG_PATH en .env`); process.exit(1); }
+if (!S.ffprobeOk()) { console.error(`FFprobe no encontrado (${S.FFPROBE}). Define FFMPEG_PATH en .env con la ruta a ffmpeg.exe (ffprobe.exe debe estar en la misma carpeta) o FFPROBE_PATH.`); process.exit(1); }
 
 if (cmd === 'plan') {
   if (!a) throw new Error('Uso: npm run test:plan -- audio.wav [segundos]');
@@ -51,6 +55,34 @@ if (cmd === 'plan') {
   S.patch(id, (s) => { s.duration = 6; s.scenes = [1, 2].map((n) => ({ scene_id: n, status: 'completed', file: `scenes/scene_00${n}.png` })); });
   await S.render(id);
   console.log(`OK → projects/${id}/output/final_video.mp4 (debe durar 6 s, cambiar a los 3 s, 1920x1080)`);
-  await S.run(S.FFMPEG.replace(/ffmpeg(\.exe)?$/, 'ffprobe$1'), ['-v', 'error', '-show_entries', 'stream=codec_name,width,height', '-of', 'default=nw=1', path.join(pd, 'output/final_video.mp4')]).catch(() => {});
-} else console.log('Comandos: plan | image | render');
+  const pr = spawnSync(S.FFPROBE, ['-v', 'error', '-show_entries', 'stream=codec_name,width,height,duration', '-of', 'default=nw=1', path.join(pd, 'output/final_video.mp4')]);
+  if (pr.status !== 0) throw new Error('FFprobe falló al verificar el MP4: ' + pr.stderr);
+  console.log(pr.stdout.toString());
+} else if (cmd === 'flow') {
+  if (!a) throw new Error('Uso: npm run test:flow -- audio.wav [segundos]');
+  if (!process.env.OPENAI_API_KEY) throw new Error('Falta OPENAI_API_KEY en .env');
+  fs.mkdirSync('projects/_tmp', { recursive: true });
+  const cut = path.resolve('projects/_tmp/flow_cut.mp3');
+  await sh(['-i', a, '-t', String(b || 25), '-vn', cut]);
+  const srv = S.app.listen(0, '127.0.0.1'); await new Promise((r) => srv.once('listening', r));
+  const api = `http://127.0.0.1:${srv.address().port}/api`;
+  const call = async (u, o) => { const r = await fetch(api + u, o); return { status: r.status, body: await r.json() }; };
+  const ok = (c, m) => { console.log(`${c ? '✓' : '✗'} ${m}`); if (!c) process.exitCode = 1; };
+  const h = (await call('/health')).body; console.log('health:', JSON.stringify({ ffmpeg: h.ffmpeg.ok, ffprobe: h.ffprobe.ok, openai: h.openai.ok, models: h.openai.models }));
+  const fd = new FormData(); fd.append('audio', new Blob([fs.readFileSync(cut)]), 'flow_test.mp3');
+  const up = await call('/projects', { method: 'POST', body: fd }); const id = up.body.id; ok(up.status === 200 && id, `UPLOAD → proyecto ${id}`);
+  ok((await call(`/projects/${id}/generate-images`, { method: 'POST' })).body.code === 'no_plan', 'GENERATE IMAGES bloqueado antes de ANALYZE');
+  await call(`/projects/${id}/analyze`, { method: 'POST' });
+  let st; do { await new Promise((r) => setTimeout(r, 1500)); st = (await call(`/projects/${id}`)).body; } while (st.running);
+  ok(!st.error, `TRANSCRIBE + ANALYZE terminados${st.error ? ' — ' + st.error : ''}`); if (st.error) { srv.close(); process.exit(1); }
+  show({ summary: st.summary, scenes: st.plan.scenes.map((x) => ({ id: x.scene_id, start: x.start, end: x.end, narration: x.narration, concept: x.visual_concept, prompt: x.prompt })) });
+  ok(st.step === 4, 'REVIEW: el pipeline se detiene en el paso 4 (revisión)');
+  ok(st.scenes.every((x) => x.status === 'pending' && !x.file), 'todas las escenas siguen en pending (0 imágenes generadas)');
+  ok(fs.readdirSync(path.join(S.pdir(id), 'scenes')).length === 0, 'la carpeta scenes/ está vacía');
+  ok((await call(`/projects/${id}/scenes/1/regenerate`, { method: 'POST' })).body.code === 'not_approved', 'REGENERATE bloqueado hasta pulsar GENERATE IMAGES');
+  await call(`/projects/${id}/analyze`, { method: 'POST' }); await new Promise((r) => setTimeout(r, 500));
+  ok((await call(`/projects/${id}`)).body.logs.some((l) => l.includes('Ya completado')), 'ANALYZE repetido reutiliza transcripción y plan (reanudable)');
+  console.log(`\nRevisa: projects/${id}/scene_plan.json  ·  Sigue sin gastar en imágenes.`);
+  srv.close(); process.exit(process.exitCode || 0);
+} else console.log('Comandos: plan | image | render | flow');
 
