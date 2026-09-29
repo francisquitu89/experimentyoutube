@@ -6,6 +6,7 @@
 //   npm run test:flow -- audio.wav [segundos=25]    UPLOAD → TRANSCRIBE → ANALYZE → REVIEW por la API HTTP. Usa OpenAI para transcribir y planificar
 //                                                   (céntimos) pero NUNCA genera imágenes: comprueba que todo queda en 'pending'.
 import 'dotenv/config';
+import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
@@ -41,6 +42,44 @@ if (cmd === 'plan') {
     await S.genImage(id, 1);
     show(S.load(id).scenes[0]);
   }
+} else if (cmd === 'sequence-plan') {
+  if (!a || !fs.existsSync(path.join('projects', a, 'state.json'))) throw new Error('Uso: npm run test:sequence-plan -- <projectId>');
+  if (!process.env.OPENAI_API_KEY) throw new Error('Falta OPENAI_API_KEY en .env');
+  const before = S.load(a).scenes.map((scene) => ({ ...scene }));
+  const imageFiles = fs.readdirSync(path.join(S.pdir(a), 'scenes')).filter((file) => /\.png$/i.test(file)).sort();
+  const plan = await S.planVisualSequences(a);
+  const transcript = JSON.parse(fs.readFileSync(path.join(S.pdir(a), 'transcript', 'transcript.json'), 'utf8'));
+  const scenePlan = JSON.parse(fs.readFileSync(path.join(S.pdir(a), 'scene_plan.json'), 'utf8'));
+  assert.equal(plan.sequences.length, scenePlan.scenes.length, 'Debe haber una secuencia por escena narrativa');
+  let totalFrames = 0;
+  for (let i = 0; i < plan.sequences.length; i++) {
+    const sequence = plan.sequences[i], source = scenePlan.scenes.find((scene) => scene.scene_id === sequence.source_scene_id);
+    assert(source, `Secuencia ${sequence.sequence_id} debe apuntar a una escena`);
+    assert.equal(Math.round(sequence.start * 1000), Math.round(source.start * 1000));
+    assert.equal(Math.round(sequence.end * 1000), Math.round(source.end * 1000));
+    assert(sequence.frames.length > 0, `Secuencia ${sequence.sequence_id} debe tener frames`);
+    let cursor = Math.round(sequence.start * 1000);
+    for (const frame of sequence.frames) {
+      const startMs = Math.round(frame.start * 1000), endMs = Math.round(frame.end * 1000);
+      assert.equal(startMs, cursor, `Frame ${frame.frame_id} deja un hueco o solape`);
+      assert.equal(Math.round(frame.duration * 1000), endMs - startMs, `Frame ${frame.frame_id} tiene duración inconsistente`);
+      assert(frame.duration >= 0.3 || frame.intentional_fast, `Frame ${frame.frame_id} dura menos de 0.3 s sin intención`);
+      if (frame.file) assert(fs.existsSync(path.join(S.pdir(a), frame.file)), `Falta imagen reutilizada ${frame.file}`);
+      cursor = endMs;
+      totalFrames++;
+    }
+    assert.equal(cursor, Math.round(sequence.end * 1000), `Los frames de secuencia ${sequence.sequence_id} no cubren su duración`);
+  }
+  assert.equal(Math.round(plan.duration * 1000), Math.round(transcript.duration * 1000));
+  assert.deepEqual(S.load(a).scenes, before, 'El planner no debe alterar estados ni imágenes de escena');
+  assert.deepEqual(fs.readdirSync(path.join(S.pdir(a), 'scenes')).filter((file) => /\.png$/i.test(file)).sort(), imageFiles,
+    'El planner no debe crear ni reemplazar imágenes');
+  show({ summary: S.summarizeVisualSequences(a), sequences: plan.sequences.map((sequence) => ({
+    sequence_id: sequence.sequence_id, start: sequence.start, end: sequence.end,
+    frames: sequence.frames.map((frame) => ({ frame_id: frame.frame_id, start: frame.start, end: frame.end,
+      duration: frame.duration, visual: frame.visual, motion: frame.motion, reused: frame.reused })),
+  })), imageGenerationCalled: false });
+  console.log(`OK: ${totalFrames} frames cover ${plan.duration}s exactly; image files and scene states unchanged.`);
 } else if (cmd === 'render') {
   const dir = path.resolve('projects/_tmp'); fs.mkdirSync(dir, { recursive: true });
   const audio = path.join(dir, 'tone.mp3');
@@ -55,9 +94,15 @@ if (cmd === 'plan') {
   S.patch(id, (s) => { s.duration = 6; s.scenes = [1, 2].map((n) => ({ scene_id: n, status: 'completed', file: `scenes/scene_00${n}.png` })); });
   await S.render(id);
   console.log(`OK → projects/${id}/output/final_video.mp4 (debe durar 6 s, cambiar a los 3 s, 1920x1080)`);
-  const pr = spawnSync(S.FFPROBE, ['-v', 'error', '-show_entries', 'stream=codec_name,width,height,duration', '-of', 'default=nw=1', path.join(pd, 'output/final_video.mp4')]);
+  const plan = JSON.parse(fs.readFileSync(path.join(pd, 'scene_plan.json'), 'utf8'));
+  if (plan.scenes.some((scene, i) => !scene.motion || (i > 0 && scene.motion.type === plan.scenes[i - 1].motion.type)))
+    throw new Error('El plan debe guardar motion y variar entre escenas consecutivas');
+  const pr = spawnSync(S.FFPROBE, ['-v', 'error', '-show_entries', 'stream=codec_name,width,height,r_frame_rate,duration:format=duration', '-of', 'json', path.join(pd, 'output/final_video.mp4')]);
   if (pr.status !== 0) throw new Error('FFprobe falló al verificar el MP4: ' + pr.stderr);
-  console.log(pr.stdout.toString());
+  const media = JSON.parse(pr.stdout.toString()), video = media.streams.find((x) => x.codec_name === 'h264'), audioStream = media.streams.find((x) => x.codec_name === 'aac');
+  if (!video || video.width !== 1920 || video.height !== 1080 || video.r_frame_rate !== '30/1') throw new Error('El video debe ser H.264 1920x1080 a 30 fps');
+  if (!audioStream || Math.abs(Number(media.format.duration) - 6) > 0.05) throw new Error('El MP4 debe conservar audio AAC y durar 6 s');
+  console.log(JSON.stringify(media, null, 2));
 } else if (cmd === 'flow') {
   if (!a) throw new Error('Uso: npm run test:flow -- audio.wav [segundos]');
   if (!process.env.OPENAI_API_KEY) throw new Error('Falta OPENAI_API_KEY en .env');

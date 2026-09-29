@@ -15,7 +15,10 @@ pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:
 #health{font-size:13px;line-height:1.7}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:#fbbf24}
 .banner{border-radius:10px;padding:10px 14px;margin:10px 0;font-size:14px}.banner.info{background:#1c2a44}.banner.warn{background:#3d3210;color:#fde68a}
 .kpi{display:flex;gap:28px;flex-wrap:wrap}.kpi div{font-size:12px;color:var(--mut)}.kpi b{display:block;font-size:22px;color:var(--fg)}
-#pv{position:relative;background:#fff;aspect-ratio:16/9;max-width:720px}#pv img{width:100%;height:100%;object-fit:contain}
+#pv{position:relative;overflow:hidden;background:#fff;aspect-ratio:16/9;max-width:720px}#pv img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform-origin:top left}
+#pv .motion-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:8px 0}.motion-controls label{display:flex;gap:8px;align-items:center}.motion-controls select{background:#0f1115;color:var(--fg);border:1px solid #333;border-radius:6px;padding:6px}.motion-controls input{width:140px}
+.sequence{padding:12px 0;border-top:1px solid #262b35}.seq-frame{display:grid;grid-template-columns:76px 150px minmax(180px,1fr) 150px;gap:12px;align-items:start;padding:8px 0;border-top:1px solid #262b35}.frame-thumb{width:72px;aspect-ratio:16/9;object-fit:cover;background:#fff;border-radius:4px}.seq-frame details{grid-column:3/5}.seq-frame summary{cursor:pointer;color:var(--mut);font-size:13px}.seq-frame pre{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:700px){body{padding:14px}.scene{grid-template-columns:1fr}.scene img,.ph{width:100%}.seq-frame{grid-template-columns:64px 1fr}.seq-frame details{grid-column:1/3}.seq-frame .frame-thumb{grid-row:1/3}}
 #sub{position:absolute;bottom:6%;left:5%;right:5%;text-align:center;color:#fff;text-shadow:0 0 4px #000,0 0 4px #000;font-size:18px}
 </style></head><body>
 <h1>🎙️ Audio → Video de YouTube</h1>
@@ -23,17 +26,22 @@ pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:
 <div class="card row"><input type="file" id="f" accept=".wav,.mp3,.m4a,.mp4" hidden>
 <button onclick="f.click()">UPLOAD AUDIO</button><span id="fn" class="mut">Ningún archivo</span>
 <button id="gen" disabled onclick="analyze()">ANALYZE</button>
+<button id="vseqbtn" class="g" disabled onclick="planSequences()">PLAN VISUAL SEQUENCES</button>
 <button id="gimg" disabled onclick="genImgs()">GENERATE IMAGES</button></div>
 <div id="proj" hidden>
  <div class="card"><div class="row"><b id="pn"></b><span class="mut" id="pd"></span></div>
  <div class="steps row" id="steps" style="margin-top:10px"></div><div id="err" class="st-failed"></div><pre id="log"></pre></div>
  <div class="card" id="sumc" hidden><b>Scene plan — revisión</b><div id="sum" style="margin-top:10px"></div></div>
+ <div class="card" id="vseqc" hidden><div class="row"><b>Visual sequences — revisión</b><span class="mut" id="vseqnote"></span><button id="testframes" onclick="genTestFrames()">GENERATE 5 TEST FRAMES</button><button id="testrender" class="g" onclick="renderTest()" disabled>RENDER TEST</button><a id="testdownload" hidden><button class="g">DOWNLOAD TEST MP4</button></a></div><div class="kpi" id="vseqsummary" style="margin:10px 0"></div><div id="vseq"></div></div>
  <div class="card" id="pvc" hidden><div id="pv"><img id="pi"><div id="sub"></div></div><audio id="au" controls style="width:100%;max-width:720px;margin-top:8px"></audio></div>
- <div class="card"><div class="row"><b>Escenas</b><button id="rb" disabled onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
+ <div class="card" id="scenec"><div class="row"><b>Escenas</b><button id="rb" disabled onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
 </div>
 <script>
 let P=null,T=null,S=['Upload','Transcribe','Analyze','Review plan','Generate images','Render video'];
+const motionTypes=['zoom_in','zoom_out','pan_left','pan_right','pan_up','pan_down','pan_diagonal','zoom_in_fast','static'];
+const motionLabels={zoom_in:'Zoom in',zoom_out:'Zoom out',pan_left:'Pan left',pan_right:'Pan right',pan_up:'Pan up',pan_down:'Pan down',pan_diagonal:'Pan diagonal',zoom_in_fast:'Fast zoom',static:'Static'};
 const $=id=>document.getElementById(id),tc=x=>`${Math.floor(x/60)}:${String(Math.floor(x%60)).padStart(2,'0')}`;
+const tc3=x=>{const ms=Math.round(x*1000),s=Math.floor(ms/1000),m=Math.floor(s/60);return `${m}:${String(s%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}`};
 const api=async(u,o={})=>{const r=await fetch('/api'+u,{...o,headers:o.body&&!(o.body instanceof FormData)?{'Content-Type':'application/json'}:{}});const j=await r.json();if(!r.ok){const e=new Error(j.error);e.code=j.code;throw e}return j};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mark=(ok,t,extra)=>`<div><span class="${ok===true?'ok':ok===false?'bad':'warn'}">${ok===true?'✓':ok===false?'✗':'?'}</span> ${esc(t)}${extra?` <span class="mut">${esc(extra)}</span>`:''}</div>`;
@@ -48,6 +56,9 @@ health();
 $('f').onchange=async()=>{const file=$('f').files[0];if(!file)return;$('fn').textContent=file.name+' — subiendo…';
  const fd=new FormData();fd.append('audio',file);try{const {id}=await api('/projects',{method:'POST',body:fd});P=id;localStorage.p=id;await poll();}catch(e){$('fn').textContent='Error al subir';alert(e.message)}};
 async function analyze(){try{await api(`/projects/${P}/analyze`,{method:'POST'});poll()}catch(e){alert(e.message)}}
+async function planSequences(){const b=$('vseqbtn');b.disabled=true;b.textContent='PLANNING…';try{await api(`/projects/${P}/visual-sequences`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='PLAN VISUAL SEQUENCES'}}
+async function genTestFrames(){const b=$('testframes');if(!confirm('Se generarán exactamente 5 imágenes de prueba. No se generarán las demás. ¿Continuar?'))return;b.disabled=true;b.textContent='GENERATING 5…';try{await api(`/projects/${P}/visual-sequences/test-frames`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='GENERATE 5 TEST FRAMES'}}
+async function renderTest(){const b=$('testrender');b.disabled=true;b.textContent='RENDERING…';try{await api(`/projects/${P}/visual-sequences/test-render`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='RENDER TEST'}}
 async function genImgs(){const sm=T.summary;let body;
  if(sm.overLimit){if(!confirm(`⚠ El plan tiene ${sm.scenes} escenas y el límite MAX_SCENES es ${sm.maxScenes}.\nSe generarán ${sm.imagesToGenerate} imágenes con ${sm.model} y el coste puede ser alto.\n¿Generar de todos modos?`))return;body=JSON.stringify({confirmOverLimit:true})}
  try{await api(`/projects/${P}/generate-images`,{method:'POST',body});poll()}catch(e){alert(e.message)}}
@@ -58,29 +69,45 @@ function draw(){const sm=T.summary,busy=T.running;$('proj').hidden=false;$('fn')
  const step=T.step||1;$('steps').innerHTML=S.map((n,i)=>`<span class="${i+1===step?'on':i+1<step?'done':''}">STEP ${i+1} · ${n}</span>`).join('');
  $('err').textContent=T.error||'';$('log').textContent=(T.logs||[]).slice(-25).join('\n');$('log').scrollTop=1e9;
  $('gen').disabled=busy||!!T.plan;$('gen').textContent=T.plan?'ANALYZED ✓':'ANALYZE';
- $('gimg').disabled=busy||!sm||sm.imagesToGenerate===0;$('gimg').textContent=sm?(sm.imagesToGenerate?`GENERATE IMAGES (${sm.imagesToGenerate})`:'IMAGES ✓'):'GENERATE IMAGES';
- $('rb').disabled=busy||!sm||sm.imagesToGenerate>0;
+ const vs=T.visualSequenceSummary,seqPlan=T.visualSequencePlan;
+ $('vseqbtn').disabled=busy||!T.plan||!!seqPlan;$('vseqbtn').textContent=seqPlan?'VISUAL SEQUENCES ✓':'PLAN VISUAL SEQUENCES';
+ $('gimg').disabled=busy||!sm||sm.imagesToGenerate===0||!!seqPlan;$('gimg').textContent=seqPlan?'FRAME GENERATION NEXT':sm?(sm.imagesToGenerate?`GENERATE IMAGES (${sm.imagesToGenerate})`:'IMAGES ✓'):'GENERATE IMAGES';
+ $('rb').disabled=busy||!sm||sm.imagesToGenerate>0||!!seqPlan;$('scenec').hidden=!!seqPlan;
  if(T.hasVideo){$('dl').hidden=false;$('dl').href=`/files/${P}/output/final_video.mp4?t=${Date.now()}`;$('dl').download='final_video.mp4'}
- $('sumc').hidden=!sm;
+ $('sumc').hidden=!sm||!!seqPlan;
  if(sm){$('sum').innerHTML=`<div class="kpi"><div><b>${tc(sm.duration)}</b>duración</div><div><b>${sm.scenes}</b>escenas</div><div><b>${sm.imagesToGenerate}</b>imágenes por generar</div><div><b>${sm.imagesCompleted}</b>ya generadas</div><div><b>${esc(sm.model)}</b>${esc(sm.size)} · ${esc(sm.quality)}</div></div>`
   +(sm.overLimit?`<div class="banner warn">⚠ El plan tiene ${sm.scenes} escenas, por encima del límite MAX_SCENES=${sm.maxScenes}. Al pulsar GENERATE IMAGES se te pedirá confirmación. Puedes borrar escenas antes.</div>`:'')
   +(!T.imagesApproved?`<div class="banner info">Revisión: todavía <b>no se ha generado ninguna imagen</b> ni se ha gastado nada en imágenes. Edita prompts, tiempos o escenas y pulsa GENERATE IMAGES cuando estés conforme.</div>`:'')}
+ $('vseqc').hidden=!seqPlan;
+ if(seqPlan&&vs){const test=T.visualFrameTest;$('vseqnote').textContent=test?`Test frames: ${vs.testFramesGenerated}/5 · ${esc(test.status)}`:'Only the 5 selected frames will be generated';$('testframes').disabled=busy||!!test;$('testframes').textContent=test?'5 TEST FRAMES '+(test.status==='completed'?'✓':'STARTED'):'GENERATE 5 TEST FRAMES';$('testrender').disabled=busy||vs.testFramesGenerated!==5||!!test?.rendered;$('testrender').textContent=test?.rendered?'TEST RENDER ✓':'RENDER TEST';
+  if(test?.rendered){$('testdownload').hidden=false;$('testdownload').href=`/files/${P}/${test.output}?t=${Date.now()}`;$('testdownload').download='visual_sequence_test.mp4'}
+  $('vseqsummary').innerHTML=`<div><b>${tc(vs.duration)}</b>duración total</div><div><b>${vs.sequences}</b>secuencias</div><div><b>${vs.frames}</b>frames planeados</div><div><b>${vs.averageFrameDuration.toFixed(2)} s</b>promedio por frame</div><div><b>${vs.estimatedImageGenerations}</b>imágenes pendientes</div><div><b>${vs.reusedFrames}</b>frames reutilizados</div><div><b>${vs.generatedFrames}</b>frames de prueba generados</div>`;
+  $('vseq').innerHTML=seqPlan.sequences.map(sequence=>`<section class="sequence"><div><b>Sequence ${sequence.sequence_id}</b> · ${tc3(sequence.start)}–${tc3(sequence.end)} · ${sequence.frames.length} frames</div><div class="mut">${esc(sequence.narration)}</div>${sequence.frames.map(frame=>`<div class="seq-frame"><div>Frame ${frame.frame_id}</div><div class="mut">${tc3(frame.start)}–${tc3(frame.end)}<br>${frame.duration.toFixed(2)} s</div><div>${frame.file?`<img class="frame-thumb" src="/files/${P}/${frame.file}">`:''}<div>${esc(frame.visual)}</div><div class="mut">${esc(frame.motion.type)} · ${Math.round(frame.motion.amount*100)}% · ${frame.testGenerated?'test generated':frame.reused?'reused':frame.status}</div>${frame.error?`<div class="st-failed">${esc(frame.error)}</div>`:''}${frame.continuity_notes?`<div class="mut">${esc(frame.continuity_notes)}</div>`:''}</div><details><summary>Prompt</summary><pre>${esc(frame.prompt)}</pre>${frame.previous_frame_context?`<div class="mut">Previous frame: ${esc(frame.previous_frame_context)}</div>`:''}</details></div>`).join('')}</section>`).join('')}
  if(!T.plan)return;$('pvc').hidden=false;if(!$('au').src)$('au').src=`/files/${P}/audio/${T.audioFile}`;
- if(document.activeElement?.tagName==='TEXTAREA'||document.activeElement?.tagName==='INPUT')return;
- $('sc').innerHTML=T.plan.scenes.map(sc=>{const e=T.scenes.find(x=>x.scene_id===sc.scene_id)||{};
+ if(document.activeElement?.tagName==='TEXTAREA'||document.activeElement?.tagName==='INPUT'||document.activeElement?.tagName==='SELECT')return;
+ $('sc').innerHTML=T.plan.scenes.map(sc=>{const e=T.scenes.find(x=>x.scene_id===sc.scene_id)||{},motion=sc.motion||{type:'static',intensity:0.08};
   return `<div class="scene"><div>${e.file?`<img src="/files/${P}/${e.file}?t=${e.timestamp||''}">`:`<div class="ph">${e.status||'pending'}</div>`}</div>
   <div><div class="mut">#${sc.scene_id} · <span class="st-${e.status}">${e.status||'pending'}${e.retry_count?` (retry ${e.retry_count})`:''}</span> ${e.error?'· '+esc(e.error):''}</div>
   <div class="row">start <input type="number" step="0.1" id="s${sc.scene_id}" value="${sc.start}"> end <input type="number" step="0.1" id="e${sc.scene_id}" value="${sc.end}"><span class="mut">${tc(sc.start)}–${tc(sc.end)} · ${(sc.end-sc.start).toFixed(1)} s</span></div>
   <p>“${esc(sc.narration)}”</p><div class="mut"><b>Concepto:</b> ${esc(sc.visual_concept)}${sc.visual_reason?` — ${esc(sc.visual_reason)}`:''}</div>
+  <div class="motion-controls"><label>Motion <select id="mt${sc.scene_id}">${motionTypes.map(type=>`<option value="${type}" ${motion.type===type?'selected':''}>${motionLabels[type]}</option>`).join('')}</select></label><label>Intensity <input type="range" id="mi${sc.scene_id}" min="0" max="0.15" step="0.01" value="${motion.intensity}" oninput="$('mv${sc.scene_id}').textContent=Math.round(this.value*100)+'%'"> <span id="mv${sc.scene_id}">${Math.round(motion.intensity*100)}%</span></label></div>
   <textarea id="p${sc.scene_id}" rows="3">${esc(sc.prompt)}</textarea>
-  <div class="row" style="margin-top:6px"><button class="g" onclick="edit(${sc.scene_id},false)">EDIT PROMPT</button><button onclick="edit(${sc.scene_id},true)" ${T.imagesApproved&&!busy?'':'disabled title="Disponible después de GENERATE IMAGES"'}>REGENERATE</button>
+  <div class="row" style="margin-top:6px"><button class="g" onclick="edit(${sc.scene_id},false)">SAVE SCENE</button><button onclick="edit(${sc.scene_id},true)" ${T.imagesApproved&&!busy?'':'disabled title="Disponible después de GENERATE IMAGES"'}>REGENERATE</button>
   <button class="g" onclick="act(${sc.scene_id},'duplicate')">DUPLICATE</button><button class="d" onclick="act(${sc.scene_id},'del')">DELETE</button></div></div></div>`}).join('')}
-async function edit(id,regen){try{await api(`/projects/${P}/scenes/${id}`,{method:'PUT',body:JSON.stringify({prompt:$('p'+id).value,start:$('s'+id).value,end:$('e'+id).value})});
+async function edit(id,regen){try{await api(`/projects/${P}/scenes/${id}`,{method:'PUT',body:JSON.stringify({prompt:$('p'+id).value,start:$('s'+id).value,end:$('e'+id).value,motion:{type:$('mt'+id).value,intensity:+$('mi'+id).value}})});
  if(regen)await api(`/projects/${P}/scenes/${id}/regenerate`,{method:'POST'});}catch(e){alert(e.message)}poll()}
 async function act(id,a){try{if(a==='del'){if(!confirm('¿Borrar escena?'))return;await api(`/projects/${P}/scenes/${id}`,{method:'DELETE'})}else await api(`/projects/${P}/scenes/${id}/duplicate`,{method:'POST'})}catch(e){alert(e.message)}poll()}
 // Preview: misma regla que el render (la escena activa es la última cuyo start <= t). Bucle rAF para cambio exacto.
 function tick(){const a=$('au');if(T?.plan){const t=a.currentTime,L=T.plan.scenes;let sc=L[0];for(const s of L){if(s.start<=t)sc=s}
  const e=T.scenes.find(x=>x.scene_id===sc.scene_id);if(e?.file){const u=`/files/${P}/${e.file}?t=${e.timestamp||''}`;if($('pi').dataset.u!==u){$('pi').dataset.u=u;$('pi').src=u}}
+ const m=sc.motion||{type:'static',intensity:0},type=m.type,intensity=Math.max(0,Math.min(.15,+m.intensity||0));
+ const frames=Math.max(1,Math.round((sc.end||T.duration)*30)-Math.round(sc.start*30)),frame=Math.max(0,Math.floor((t-sc.start)*30)),progress=Math.min(frame/frames,1);
+ let zoom=1,cx=0,cy=0;if(type==='zoom_in')zoom=1+intensity*progress;else if(type==='zoom_out')zoom=1+intensity*(1-progress);
+ else if(type==='zoom_in_fast')zoom=1+intensity*Math.min(frame/Math.max(1,Math.min(frames,21)),1);
+ else if(type?.startsWith('pan_')){zoom=1+intensity;const dx=$('pv').clientWidth*(1-1/zoom),dy=$('pv').clientHeight*(1-1/zoom);
+  if(type==='pan_left')cx=dx*(1-progress);if(type==='pan_right')cx=dx*progress;if(type==='pan_up')cy=dy*(1-progress);if(type==='pan_down')cy=dy*progress;
+  if(type==='pan_diagonal'){cx=dx*progress;cy=dy*progress}}
+ $('pi').style.transform=`translate(${-cx}px,${-cy}px) scale(${zoom})`;
  const g=T.subs.find(s=>t>=s.start&&t<s.end);$('sub').textContent=g?g.text:''}
  requestAnimationFrame(tick)}
 requestAnimationFrame(tick);

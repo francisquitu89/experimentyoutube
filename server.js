@@ -155,6 +155,7 @@ Every scene "start" MUST equal the start time of one of the given segments; scen
     scene_id: i + 1, start: +x.start.toFixed(2), end: +x.end.toFixed(2), duration: +(x.end - x.start).toFixed(2),
     narration: x.narration, visual_concept: x.visual_concept, visual_reason: x.visual_reason,
     prompt: x.prompt, character_ids: x.character_ids, importance: x.importance, status: 'pending' })) };
+    plan.scenes.forEach((scene, index) => { scene.motion = chooseMotion(scene, index, plan.scenes[index - 1]?.motion?.type); });
   fs.writeFileSync(f, JSON.stringify(plan, null, 2));
   patch(id, (s) => { s.scenes = plan.scenes.map((x) => ({ scene_id: x.scene_id, status: 'pending', retry_count: 0, file: null, error: null })); });
   log(id, `[SCENE ANALYSIS] Completed (${plan.scenes.length} scenes, ${out.characters.length} personajes)`);
@@ -176,6 +177,313 @@ function fullPrompt(id, sc) {
   ].filter(Boolean).join('\n');
 }
 const pad = (n) => String(n).padStart(3, '0');
+const MOTION_TYPES = ['zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down', 'pan_diagonal', 'zoom_in_fast', 'static'];
+function chooseMotion(sc, index, previous) {
+  const text = `${sc.narration || ''} ${sc.visual_concept || ''} ${sc.visual_reason || ''} ${sc.prompt || ''}`.toLowerCase();
+  let type;
+  if (/punchline|remate|chiste|funny|joke|surprising/.test(text)) type = 'zoom_in_fast';
+  else if (/loss|p[eé]rdida|retroceso|deja de crecer|stopped|fall(?:s|ing)?|declin/.test(text)) type = 'zoom_out';
+  else if (/grow(?:th|ing)?|crec(?:e|imiento)|increase|rising|build(?:ing)?/.test(text)) type = 'zoom_in';
+  else if (/between|enfrent|contrast|versus|balance|balanced/.test(text)) type = index % 2 ? 'pan_left' : 'pan_right';
+  else if (/person|persona|stands|standing|holds|holding/.test(text)) type = index % 2 ? 'pan_right' : 'pan_left';
+  else type = MOTION_TYPES[(index * 3 + 1) % (MOTION_TYPES.length - 1)];
+  if (type === previous) type = MOTION_TYPES.find((candidate) => candidate !== previous && candidate !== 'static') || 'static';
+  const intensity = type === 'zoom_in_fast' ? 0.12 : type === 'static' ? 0 : Number(sc.importance) >= 0.9 ? 0.15 : 0.08;
+  return { type, intensity, direction: type.startsWith('pan_') ? type.slice(4) : 'center', duration: +(sc.end - sc.start).toFixed(2) };
+}
+function ensureMotionPlan(id) {
+  const file = path.join(pdir(id), 'scene_plan.json'), plan = rd(file);
+  let previous = null, changed = false;
+  plan.scenes.forEach((sc, index) => {
+    if (!sc.motion || !MOTION_TYPES.includes(sc.motion.type)) { sc.motion = chooseMotion(sc, index, previous); changed = true; }
+    previous = sc.motion.type;
+  });
+  if (changed) fs.writeFileSync(file, JSON.stringify(plan, null, 2));
+  return plan;
+}
+const SEQUENCE_SCHEMA = {
+  name: 'visual_sequence_plan', strict: true,
+  schema: {
+    type: 'object', additionalProperties: false, required: ['sequences'],
+    properties: { sequences: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false, required: ['sequence_id', 'frames'],
+        properties: {
+          sequence_id: { type: 'integer' },
+          frames: {
+            type: 'array', items: {
+              type: 'object', additionalProperties: false,
+              required: ['start_offset', 'visual', 'prompt', 'previous_frame_context', 'continuity_notes', 'motion_type', 'motion_amount', 'intentional_fast'],
+              properties: {
+                start_offset: { type: 'number' }, visual: { type: 'string' }, prompt: { type: 'string' },
+                previous_frame_context: { type: 'string' }, continuity_notes: { type: 'string' },
+                motion_type: { type: 'string', enum: MOTION_TYPES }, motion_amount: { type: 'number' }, intentional_fast: { type: 'boolean' },
+              },
+            },
+          },
+        },
+      },
+    } },
+  },
+};
+const sequencePlanFile = (id) => path.join(pdir(id), 'visual_sequence_plan.json');
+function framePrompt(id, scene, beat) {
+  const dir = pdir(id), bible = rd(path.join(dir, 'style_bible.json'));
+  const characterFile = path.join(dir, 'characters.json');
+  const characters = (fs.existsSync(characterFile) ? rd(characterFile) : []).filter((c) => (scene.character_ids || []).includes(c.id));
+  return [
+    `Sequence context: ${scene.visual_concept}. Narration: ${scene.narration}`,
+    `Frame visual: ${beat.visual}. Draw this exact moment: ${beat.prompt}`,
+    characters.length ? `Recurring characters, keep exactly consistent: ${characters.map((c) => `${c.name}: ${c.description}`).join('; ')}.` : '',
+    beat.previous_frame_context ? `Previous frame: ${beat.previous_frame_context}` : 'Opening frame of this sequence.',
+    beat.continuity_notes ? `Continuity: ${beat.continuity_notes}` : '',
+    `Approved style bible: ${bible.visual_style}; ${bible.line_style}; ${bible.character_style}; ${bible.color_policy}; ${bible.background_policy}.`,
+    `Composition: ${bible.composition_policy}. Text: ${bible.text_policy}. Avoid: ${bible.negative}.`,
+  ].filter(Boolean).join('\n');
+}
+function summarizeVisualSequences(id) {
+  const file = sequencePlanFile(id);
+  if (!fs.existsSync(file)) return null;
+  const plan = rd(file), state = load(id), frames = plan.sequences.flatMap((sequence) => sequence.frames);
+  const statusOf = (frame) => {
+    const saved = state.visualFrameImages?.[frame.frame_id];
+    if (saved?.status === 'completed' && saved.file && fs.existsSync(path.join(pdir(id), saved.file))) return 'completed';
+    return frame.reused && frame.file && fs.existsSync(path.join(pdir(id), frame.file)) ? 'completed' : saved?.status || 'pending';
+  };
+  const reusable = frames.filter((frame) => frame.reused && statusOf(frame) === 'completed').length;
+  const generated = frames.filter((frame) => !frame.reused && statusOf(frame) === 'completed').length;
+  const pending = frames.filter((frame) => !frame.reused && statusOf(frame) !== 'completed').length;
+  return { duration: plan.duration, sequences: plan.sequences.length, frames: frames.length,
+    averageFrameDuration: frames.length ? +(plan.duration / frames.length).toFixed(2) : 0,
+    reusedFrames: reusable, generatedFrames: generated, imagesToGenerate: pending, estimatedImageGenerations: pending,
+    testFramesRequested: state.visualFrameTest?.requested || 0, testFramesGenerated: state.visualFrameTest?.frame_ids?.filter((id) => statusOf(frames.find((frame) => frame.frame_id === id) || {}) === 'completed').length || 0,
+    testRender: state.visualFrameTest?.rendered ? state.visualFrameTest.output : null };
+}
+function visualSequenceView(id) {
+  const planFile = sequencePlanFile(id);
+  if (!fs.existsSync(planFile)) return null;
+  const plan = rd(planFile), state = load(id);
+  return { ...plan, sequences: plan.sequences.map((sequence) => ({ ...sequence, frames: sequence.frames.map((frame) => {
+    const saved = state.visualFrameImages?.[frame.frame_id];
+    if (saved?.status === 'completed' && saved.file && fs.existsSync(path.join(pdir(id), saved.file)))
+      return { ...frame, status: 'completed', file: saved.file, testGenerated: true, error: null };
+    if (frame.reused && frame.file && fs.existsSync(path.join(pdir(id), frame.file)))
+      return { ...frame, status: 'completed', reused: true, testGenerated: false };
+    return { ...frame, status: saved?.status || 'pending', file: null, testGenerated: false, error: saved?.error || null };
+  }) })) };
+}
+function chooseTestFrames(id, count = 5) {
+  const plan = visualSequenceView(id);
+  if (!plan) throw new Error('Primero crea el visual sequence plan');
+  const pending = plan.sequences.flatMap((sequence) => sequence.frames.filter((frame) => !frame.reused && frame.status === 'pending')
+    .map((frame) => ({ ...frame, sequence_id: sequence.sequence_id })));
+  if (pending.length < count) throw new Error(`Sólo quedan ${pending.length} frames pendientes; no se puede generar ${count} nuevos`);
+  const groups = new Map();
+  pending.forEach((frame) => groups.set(frame.sequence_id, [...(groups.get(frame.sequence_id) || []), frame]));
+  const largest = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0] - b[0])[0][1];
+  const selected = [...largest].sort((a, b) => a.start - b.start);
+  const rest = pending.filter((frame) => !selected.some((chosen) => chosen.frame_id === frame.frame_id));
+  while (selected.length < count) {
+    const center = (selected[0].start + selected.at(-1).end) / 2;
+    rest.sort((a, b) => Math.abs((a.start + a.end) / 2 - center) - Math.abs((b.start + b.end) / 2 - center));
+    selected.push(rest.shift());
+  }
+  return selected.sort((a, b) => a.start - b.start);
+}
+async function generateTestFrames(id) {
+  if (running.has(id)) throw new Error('Ya hay un proceso en curso para este proyecto');
+  if (!openai) throw new Error('Falta OPENAI_API_KEY en .env');
+  const state = load(id);
+  if (state.visualFrameTest) throw new Error('La generación de 5 frames de prueba ya fue ejecutada');
+  const selected = chooseTestFrames(id, 5), dir = pdir(id);
+  fs.mkdirSync(path.join(dir, 'frames'), { recursive: true });
+  running.add(id);
+  patch(id, (current) => {
+    current.visualFrameImages ||= {};
+    current.visualFrameTest = { requested: 5, frame_ids: selected.map((frame) => frame.frame_id), started_at: new Date().toISOString(), status: 'generating' };
+    for (const frame of selected) current.visualFrameImages[frame.frame_id] = { status: 'generating', sequence_id: frame.sequence_id, error: null };
+  });
+  try {
+    for (const frame of selected) {
+      const rel = `frames/frame_${pad(frame.frame_id)}.png`;
+      log(id, `[TEST FRAME ${pad(frame.frame_id)}] Generating once (${frame.sequence_id} sequence)`);
+      try {
+        const response = await openai.images.generate({ model: M.im, prompt: frame.prompt, size: IMG_SIZE, quality: IMG_QUALITY, n: 1 });
+        const image = response.data[0]?.b64_json;
+        if (!image) throw new Error('Respuesta sin b64_json');
+        fs.writeFileSync(path.join(dir, rel), Buffer.from(image, 'base64'));
+        patch(id, (current) => { current.visualFrameImages[frame.frame_id] = { status: 'completed', sequence_id: frame.sequence_id,
+          file: rel, model: M.im, size: IMG_SIZE, timestamp: new Date().toISOString(), error: null }; });
+        log(id, `[TEST FRAME ${pad(frame.frame_id)}] Completed`);
+      } catch (error) {
+        patch(id, (current) => { current.visualFrameImages[frame.frame_id] = { status: 'failed', sequence_id: frame.sequence_id, error: redact(error.message) }; });
+        log(id, `[TEST FRAME ${pad(frame.frame_id)}] Failed: ${error.message}`);
+      }
+    }
+    const current = load(id), generated = selected.filter((frame) => current.visualFrameImages[frame.frame_id]?.status === 'completed');
+    patch(id, (next) => { next.visualFrameTest.status = generated.length === 5 ? 'completed' : 'partial'; next.visualFrameTest.completed_at = new Date().toISOString(); });
+    return { requested: 5, generated: generated.length, frame_ids: selected.map((frame) => frame.frame_id), sequence_ids: [...new Set(selected.map((frame) => frame.sequence_id))] };
+  } finally { running.delete(id); }
+}
+const srtTimestamp = (seconds) => {
+  const ms = Math.max(0, Math.round(seconds * 1000)), h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000), s = Math.floor(ms % 60000 / 1000), fraction = ms % 1000;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(fraction).padStart(3, '0')}`;
+};
+async function renderVisualTest(id) {
+  if (!ffmpegOk() || !ffprobeOk()) assertTools();
+  const dir = pdir(id), state = load(id), plan = visualSequenceView(id), test = state.visualFrameTest;
+  if (!test || test.status !== 'completed' || test.frame_ids?.length !== 5) throw new Error('Primero deben completarse los 5 frames de prueba');
+  const byId = new Map(plan.sequences.flatMap((sequence) => sequence.frames.map((frame) => [frame.frame_id, frame])));
+  const frames = test.frame_ids.map((frameId) => byId.get(frameId));
+  if (frames.some((frame) => !frame || frame.status !== 'completed' || !frame.file || !fs.existsSync(path.join(dir, frame.file))))
+    throw new Error('Falta una imagen de los 5 frames de prueba');
+  const sorted = frames.sort((a, b) => a.start - b.start), temp = path.join(dir, 'output', '_visual_test');
+  fs.rmSync(temp, { recursive: true, force: true }); fs.mkdirSync(temp, { recursive: true });
+  const transcriptFile = path.join(dir, 'transcript', 'transcript.json'), transcript = fs.existsSync(transcriptFile) ? rd(transcriptFile) : { segments: [] };
+  const subtitleLines = [], videoLines = [], audioFilters = [];
+  let outputCursor = 0;
+  for (const frame of sorted) {
+    const words = (transcript.words || []).filter((word) => word.end > frame.start && word.start < frame.end)
+      .map((word) => ({ start: Math.max(frame.start, word.start), end: Math.min(frame.end, word.end), text: word.word.trim() }))
+      .filter((word) => word.text && word.end > word.start);
+    if (words.length) {
+      let group = [];
+      const writeGroup = () => {
+        if (!group.length) return;
+        const cueStart = outputCursor + group[0].start - frame.start, cueEnd = outputCursor + group.at(-1).end - frame.start;
+        const text = group.map((word) => word.text).join(' ').replace(/\s+([,.;!?])/g, '$1');
+        if (cueEnd > cueStart) subtitleLines.push(`${subtitleLines.length + 1}\n${srtTimestamp(cueStart)} --> ${srtTimestamp(cueEnd)}\n${text}\n`);
+        group = [];
+      };
+      for (const word of words) {
+        const gap = group.length ? word.start - group.at(-1).end : 0;
+        const previous = group.at(-1)?.text || '';
+        if (group.length && (group.length >= 7 || gap > 0.6 || /[,.;!?]$/.test(previous))) writeGroup();
+        group.push(word);
+      }
+      writeGroup();
+    } else {
+      const cue = transcript.segments.find((segment) => segment.start >= frame.start && segment.start < frame.end);
+      if (cue) subtitleLines.push(`${subtitleLines.length + 1}\n${srtTimestamp(outputCursor)} --> ${srtTimestamp(outputCursor + frame.duration)}\n${cue.text.trim()}\n`);
+    }
+    outputCursor += frame.duration;
+  }
+  const subtitleFile = path.join(dir, 'output', 'visual_sequence_test.srt');
+  fs.writeFileSync(subtitleFile, subtitleLines.join('\n'));
+  try {
+    for (const [index, frame] of sorted.entries()) {
+      const filename = `frame_${pad(frame.frame_id)}.mp4`, frameCount = Math.max(1, Math.round(frame.duration * 30));
+      await run(FFMPEG, ['-y', '-loop', '1', '-framerate', '30', '-i', frame.file, '-vf', motionExpressions(frame.motion, frameCount),
+        '-frames:v', String(frameCount), '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-r', '30', path.join(temp, filename)], { cwd: dir });
+      videoLines.push(`file '${path.join(temp, filename).replace(/\\/g, '/')}'`);
+      audioFilters.push(`[1:a]atrim=start=${frame.start.toFixed(3)}:end=${frame.end.toFixed(3)},asetpts=PTS-STARTPTS[a${index}]`);
+    }
+    const concatFile = path.join(temp, 'concat.txt');
+    fs.writeFileSync(concatFile, videoLines.join('\n'));
+    const filter = `${audioFilters.join(';')};${sorted.map((_frame, index) => `[a${index}]`).join('')}concat=n=5:v=0:a=1[aout]`;
+    await run(FFMPEG, ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-i', `audio/${state.audioFile}`,
+      '-filter_complex', filter, '-map', '0:v:0', '-map', '[aout]', '-vf', "subtitles=output/visual_sequence_test.srt:force_style='FontSize=18,Outline=2,MarginV=40'",
+      '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30', '-c:a', 'aac', '-b:a', '192k',
+      '-t', outputCursor.toFixed(3), '-movflags', '+faststart', 'output/visual_sequence_test.mp4'], { cwd: dir });
+    const outputFile = path.join(dir, 'output', 'visual_sequence_test.mp4');
+    const probe = spawnSync(FFPROBE, ['-v', 'error', '-show_entries', 'stream=codec_name,width,height,r_frame_rate,duration', '-of', 'json', outputFile]);
+    if (probe.status !== 0) throw new Error('FFprobe no pudo validar el render de prueba');
+    const streams = JSON.parse(probe.stdout.toString()).streams;
+    if (!streams.some((stream) => stream.codec_name === 'h264' && stream.width === 1920 && stream.height === 1080 && stream.r_frame_rate === '30/1'))
+      throw new Error('El render de prueba no quedó en H.264 1920x1080 30 fps');
+    if (!streams.some((stream) => stream.codec_name === 'aac')) throw new Error('El render de prueba no contiene audio AAC');
+    patch(id, (current) => { current.visualFrameTest.rendered = true; current.visualFrameTest.output = 'output/visual_sequence_test.mp4'; });
+    log(id, '[VISUAL TEST RENDER] Completed (5 frames, source audio intervals and shifted subtitles)');
+    return { output: 'output/visual_sequence_test.mp4', duration: +outputCursor.toFixed(3), frames: sorted.map((frame) => frame.frame_id) };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+async function planVisualSequences(id) {
+  const file = sequencePlanFile(id);
+  if (fs.existsSync(file)) return rd(file);
+  const dir = pdir(id), sceneFile = path.join(dir, 'scene_plan.json'), transcriptFile = path.join(dir, 'transcript', 'transcript.json');
+  if (!fs.existsSync(sceneFile) || !fs.existsSync(transcriptFile)) throw new Error('Primero deben existir scene_plan.json y transcript.json');
+  const scenePlan = ensureMotionPlan(id), transcript = rd(transcriptFile), state = load(id);
+  const styleFile = path.join(dir, 'style_bible.json');
+  if (!fs.existsSync(styleFile)) fs.writeFileSync(styleFile, JSON.stringify(STYLE, null, 2));
+  const charactersFile = path.join(dir, 'characters.json');
+  const characters = fs.existsSync(charactersFile) ? rd(charactersFile) : [];
+  const input = { duration: transcript.duration, characters, scenes: scenePlan.scenes.map((scene) => ({
+    sequence_id: scene.scene_id, start: scene.start, end: scene.end, narration: scene.narration,
+    visual_concept: scene.visual_concept, visual_reason: scene.visual_reason, current_visual_prompt: scene.prompt,
+    character_ids: scene.character_ids, importance: scene.importance,
+    word_timestamps: (transcript.words || []).filter((word) => word.start >= scene.start && word.start < scene.end)
+      .map((word) => ({ start: +word.start.toFixed(3), text: word.word })),
+  })) };
+  const system = `You are an experienced YouTube editor planning static drawing frames for a hand-made flipbook sequence. Preserve each input scene as one narrative sequence; create multiple frames only for useful visual beats (action, reaction, object appearing/disappearing, consequence, metaphor, contrast, emphasis, joke). Never create a frame just because a word changed. Every prompt describes a static drawing, never video or character animation. Adjacent frames in one sequence must be small, coherent changes: same characters, clothes, colors, proportions, objects and composition unless the narration motivates a change. First frame is the opening state and should match current_visual_prompt. Use the exact approved style bible supplied in the input as visual constraints, but keep the frame prompt focused on content. Choose timing offsets relative to sequence start using the supplied word timestamps; frame 1 starts at offset 0, all later offsets should align near a spoken word start. Use variable pacing: calm explanation usually 2-3 s per frame, normal 1-2 s, visible actions 0.5-1.2 s, and only intentional punchline cuts may be shorter than 0.3 s. Do not force these rates when no new visual beat exists. Choose subtle camera motion, amount normally 0.01-0.03 and never above 0.04; camera is secondary to the drawing changes. Select different motion types for adjacent frames when useful; static is valid. Return one sequence for each input scene with its sequence_id unchanged. Frame prompt must be English and describe the single static drawing. previous_frame_context and continuity_notes should explain only what is needed to preserve continuity.`;
+  log(id, '[VISUAL SEQUENCES] Planning started');
+  const response = await openai.chat.completions.create({ model: M.re, response_format: { type: 'json_schema', json_schema: SEQUENCE_SCHEMA },
+    messages: [{ role: 'system', content: system }, { role: 'user', content: `Approved style bible:\n${JSON.stringify(rd(styleFile))}\nExisting characters and scene/timestamp data:\n${JSON.stringify(input)}` }] });
+  const generated = JSON.parse(response.choices[0].message.content);
+  const generatedById = new Map(generated.sequences.map((sequence) => [sequence.sequence_id, sequence]));
+  const outputSequences = [];
+  let nextFrameId = 1, previousMotion = null;
+  for (const scene of [...scenePlan.scenes].sort((a, b) => a.start - b.start)) {
+    const raw = [...(generatedById.get(scene.scene_id)?.frames || [])].sort((a, b) => a.start_offset - b.start_offset);
+    if (!raw.length) raw.push({ start_offset: 0, visual: scene.visual_concept, prompt: scene.prompt,
+      previous_frame_context: '', continuity_notes: '', motion_type: scene.motion?.type || 'static', motion_amount: 0.02, intentional_fast: false });
+    const startMs = Math.round(scene.start * 1000), endMs = Math.round(scene.end * 1000), durationMs = endMs - startMs;
+    const wordStarts = (transcript.words || []).filter((word) => word.start >= scene.start && word.start < scene.end).map((word) => Math.round(word.start * 1000));
+    const beatStarts = [{ beat: raw[0], at: startMs }];
+    let cursor = startMs;
+    for (const beat of raw.slice(1)) {
+      const target = startMs + Math.max(0, Math.min(durationMs, Math.round(Number(beat.start_offset) * 1000)));
+      if (target >= endMs) continue;
+      const snapped = wordStarts.length ? wordStarts.reduce((best, value) => Math.abs(value - target) < Math.abs(best - target) ? value : best) : target;
+      if (snapped <= cursor || (snapped - cursor < 300 && !beat.intentional_fast)) continue;
+      beatStarts.push({ beat, at: snapped });
+      cursor = snapped;
+    }
+    if (beatStarts.length > 1 && endMs - beatStarts.at(-1).at < 300 && !beatStarts.at(-1).beat.intentional_fast) beatStarts.pop();
+    const sceneState = state.scenes.find((entry) => entry.scene_id === scene.scene_id);
+    const reusableFile = sceneState?.status === 'completed' && sceneState.file && fs.existsSync(path.join(dir, sceneState.file)) ? sceneState.file : null;
+    const frames = beatStarts.map(({ beat, at }, index) => {
+      const first = index === 0, frameEndMs = index < beatStarts.length - 1 ? beatStarts[index + 1].at : endMs;
+      const visual = first && reusableFile ? scene.visual_concept : beat.visual;
+      const detail = first && reusableFile ? scene.prompt : beat.prompt;
+      let motionType = MOTION_TYPES.includes(beat.motion_type) ? beat.motion_type : 'static';
+      if (motionType === previousMotion && motionType !== 'static') motionType = MOTION_TYPES.find((type) => type !== motionType && type !== 'static') || 'static';
+      previousMotion = motionType;
+      const amount = motionType === 'static' ? 0 : Math.max(0, Math.min(0.04, Number(beat.motion_amount) || 0.02));
+      const continuity = first && reusableFile ? 'Reuse the approved existing scene drawing as the opening state.' : beat.continuity_notes;
+      const promptBeat = { visual, prompt: detail, previous_frame_context: first && reusableFile ? '' : beat.previous_frame_context, continuity_notes: continuity };
+      const frame = { frame_id: nextFrameId++, start: +(at / 1000).toFixed(3), end: +(frameEndMs / 1000).toFixed(3),
+        duration: +((frameEndMs - at) / 1000).toFixed(3), visual, prompt: framePrompt(id, scene, promptBeat),
+        previous_frame_context: promptBeat.previous_frame_context, continuity_notes: continuity,
+        motion: { type: motionType, amount }, intentional_fast: !!beat.intentional_fast, status: first && reusableFile ? 'completed' : 'pending',
+        file: first && reusableFile ? reusableFile : null, reused: !!(first && reusableFile) };
+      return frame;
+    });
+    outputSequences.push({ sequence_id: scene.scene_id, source_scene_id: scene.scene_id, start: scene.start, end: scene.end,
+      duration: +(durationMs / 1000).toFixed(3), narration: scene.narration, visual_concept: scene.visual_concept, frames });
+  }
+  const plan = { version: 1, model: M.re, created_at: new Date().toISOString(), duration: transcript.duration, sequences: outputSequences };
+  fs.writeFileSync(file, JSON.stringify(plan, null, 2));
+  log(id, `[VISUAL SEQUENCES] Completed (${outputSequences.length} sequences, ${outputSequences.reduce((sum, sequence) => sum + sequence.frames.length, 0)} frames; no images generated)`);
+  return plan;
+}
+function motionExpressions(motion, frames) {
+  const type = MOTION_TYPES.includes(motion?.type) ? motion.type : 'static';
+  const intensity = Math.max(0, Math.min(motion?.amount != null ? 0.04 : 0.15, Number(motion?.intensity ?? motion?.amount) || 0));
+  const progress = `min(on/${Math.max(1, frames)}\\,1)`;
+  let zoom = '1', x = '(iw-iw/zoom)/2', y = '(ih-ih/zoom)/2';
+  if (type === 'zoom_in') zoom = `1+${intensity}*${progress}`;
+  else if (type === 'zoom_out') zoom = `1+${intensity}*(1-${progress})`;
+  else if (type === 'zoom_in_fast') zoom = `1+${intensity}*min(on/${Math.max(1, Math.min(frames, 21))}\\,1)`;
+  else if (type.startsWith('pan_')) {
+    zoom = `1+${intensity}`;
+    if (type === 'pan_left') x = `(iw-iw/zoom)*(1-${progress})`;
+    if (type === 'pan_right') x = `(iw-iw/zoom)*${progress}`;
+    if (type === 'pan_up') y = `(ih-ih/zoom)*(1-${progress})`;
+    if (type === 'pan_down') y = `(ih-ih/zoom)*${progress}`;
+    if (type === 'pan_diagonal') { x = `(iw-iw/zoom)*${progress}`; y = `(ih-ih/zoom)*${progress}`; }
+  }
+  return `scale=1920:1080,zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=1920x1080:fps=30,setsar=1,format=yuv420p`;
+}
 
 async function genImage(id, sid) {
   const plan = rd(path.join(pdir(id), 'scene_plan.json'));
@@ -223,7 +531,7 @@ async function analyze(id) {
 // Resumen del plan para la pantalla de revisión (siempre calculado en vivo desde scene_plan.json + state.json)
 function summarize(id) {
   const pf = path.join(pdir(id), 'scene_plan.json'); if (!fs.existsSync(pf)) return null;
-  const s = load(id), plan = rd(pf);
+  const s = load(id), plan = ensureMotionPlan(id);
   const done = (sc) => { const e = (s.scenes || []).find((x) => x.scene_id === sc.scene_id); return e?.status === 'completed' && e.file && fs.existsSync(path.join(pdir(id), e.file)); };
   const scenes = plan.scenes.length, completed = plan.scenes.filter(done).length;
   return { duration: s.duration, scenes, imagesToGenerate: scenes - completed, imagesCompleted: completed,
@@ -250,25 +558,35 @@ async function generateImages(id) {
 
 async function render(id) {
   if (!ffmpegOk()) throw new Error(FFMPEG_HELP);
-  const dir = pdir(id), s = load(id), plan = rd(path.join(dir, 'scene_plan.json'));
-  const missing = plan.scenes.filter((sc) => { const e = s.scenes.find((x) => x.scene_id === sc.scene_id); return !e || e.status !== 'completed'; });
+  const dir = pdir(id), s = load(id), plan = ensureMotionPlan(id);
+  const missing = plan.scenes.filter((sc) => { const e = s.scenes.find((x) => x.scene_id === sc.scene_id); return !e || e.status !== 'completed' || !e.file || !fs.existsSync(path.join(dir, e.file)); });
   if (missing.length) throw new Error(`Faltan imágenes en escenas: ${missing.map((x) => x.scene_id).join(', ')}`);
   log(id, '[RENDER] Started');
   fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
-  const lines = [];
-  const scs = [...plan.scenes].sort((a, b) => a.start - b.start);
-  scs.forEach((sc, i) => {
-    if (i === 0) sc.start = 0;
-    const end = i < scs.length - 1 ? scs[i + 1].start : Math.max(sc.end, s.duration);
-    lines.push(`file '${s.scenes.find((x) => x.scene_id === sc.scene_id).file}'`, `duration ${Math.max(0.05, end - sc.start).toFixed(3)}`);
-  });
-  lines.push(lines[lines.length - 2]); // ffmpeg concat: repetir el último archivo
-  fs.writeFileSync(path.join(dir, 'concat.txt'), lines.join('\n'));
-  const vf = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:white,setsar=1,fps=30,format=yuv420p'
-    + (fs.existsSync(path.join(dir, 'transcript', 'subtitles.srt'))
-      ? ",subtitles=transcript/subtitles.srt:force_style='FontSize=18,Outline=2,MarginV=40'" : '');
-  await run(FFMPEG, ['-y', '-f', 'concat', '-safe', '0', '-i', 'concat.txt', '-i', `audio/${s.audioFile}`, '-vf', vf,
-    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', 'output/final_video.mp4'], { cwd: dir });
+  const temp = path.join(dir, 'output', '_render');
+  fs.rmSync(temp, { recursive: true, force: true });
+  fs.mkdirSync(temp, { recursive: true });
+  try {
+    const sorted = [...plan.scenes].sort((a, b) => a.start - b.start), lines = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const sc = sorted[i], start = i === 0 ? 0 : sc.start;
+      const end = i < sorted.length - 1 ? sorted[i + 1].start : s.duration;
+      const frames = Math.max(1, Math.round(end * 30) - Math.round(start * 30));
+      const file = `scene_${pad(sc.scene_id)}.mp4`;
+      const image = s.scenes.find((x) => x.scene_id === sc.scene_id).file;
+      await run(FFMPEG, ['-y', '-loop', '1', '-framerate', '30', '-i', image, '-vf', motionExpressions(sc.motion, frames),
+        '-frames:v', String(frames), '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-r', '30', path.join(temp, file)], { cwd: dir });
+      lines.push(`file '${path.join(temp, file).replace(/\\/g, '/')}'`);
+    }
+    const concatFile = path.join(temp, 'concat.txt');
+    fs.writeFileSync(concatFile, lines.join('\n'));
+    const args = ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-i', `audio/${s.audioFile}`, '-map', '0:v:0', '-map', '1:a:0'];
+    if (fs.existsSync(path.join(dir, 'transcript', 'subtitles.srt')))
+      args.push('-vf', "subtitles=transcript/subtitles.srt:force_style='FontSize=18,Outline=2,MarginV=40'");
+    args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30',
+      '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', 'output/final_video.mp4');
+    await run(FFMPEG, args, { cwd: dir });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   patch(id, (x) => { x.rendered = true; });
   log(id, '[RENDER] Completed');
 }
@@ -346,7 +664,9 @@ app.post('/api/projects', upload.single('audio'), wrap(async (req, res) => {
 app.get('/api/projects/:id', wrap((req, res) => {
   const s = load(req.params.id);
   const pf = path.join(pdir(s.id), 'scene_plan.json'), tf = path.join(pdir(s.id), 'transcript', 'transcript.json');
-  res.json({ ...s, running: running.has(s.id), plan: fs.existsSync(pf) ? rd(pf) : null, summary: summarize(s.id),
+  const vpf = sequencePlanFile(s.id);
+  res.json({ ...s, running: running.has(s.id), plan: fs.existsSync(pf) ? ensureMotionPlan(s.id) : null, summary: summarize(s.id),
+    visualSequencePlan: fs.existsSync(vpf) ? visualSequenceView(s.id) : null, visualSequenceSummary: summarizeVisualSequences(s.id),
     subs: fs.existsSync(tf) ? rd(tf).segments : [], hasVideo: fs.existsSync(path.join(pdir(s.id), 'output', 'final_video.mp4')) });
 }));
 
@@ -356,6 +676,35 @@ app.post('/api/projects/:id/analyze', wrap((req, res) => {
   if (!openai) throw httpErr('Falta OPENAI_API_KEY en .env');
   if (running.has(req.params.id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
   analyze(req.params.id); res.json({ ok: true });
+}));
+app.post('/api/projects/:id/visual-sequences', wrap(async (req, res) => {
+  const id = req.params.id;
+  load(id);
+  if (!openai) throw httpErr('Falta OPENAI_API_KEY en .env');
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  if (!fs.existsSync(path.join(pdir(id), 'scene_plan.json')) || !fs.existsSync(path.join(pdir(id), 'transcript', 'transcript.json')))
+    throw httpErr('Primero ejecuta ANALYZE para crear escenas y transcripción.', 409, 'missing_source');
+  running.add(id);
+  try {
+    await planVisualSequences(id);
+    res.json({ ok: true, summary: summarizeVisualSequences(id) });
+  } finally { running.delete(id); }
+}));
+app.post('/api/projects/:id/visual-sequences/test-frames', wrap(async (req, res) => {
+  const id = req.params.id;
+  load(id);
+  if (!fs.existsSync(sequencePlanFile(id))) throw httpErr('Primero crea el visual sequence plan.', 409, 'missing_visual_plan');
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  if (load(id).visualFrameTest) throw httpErr('La prueba de cinco frames ya fue iniciada y no se repetirá.', 409, 'test_already_started');
+  res.json(await generateTestFrames(id));
+}));
+app.post('/api/projects/:id/visual-sequences/test-render', wrap(async (req, res) => {
+  const id = req.params.id;
+  load(id);
+  if (running.has(id)) throw httpErr('Ya hay un proceso en curso para este proyecto', 409);
+  running.add(id);
+  try { res.json(await renderVisualTest(id)); }
+  finally { running.delete(id); }
 }));
 // GENERATE IMAGES: sólo tras el plan y sólo por petición explícita. Si el plan supera MAX_SCENES exige confirmOverLimit=true.
 app.post('/api/projects/:id/generate-images', wrap((req, res) => {
@@ -382,14 +731,18 @@ app.post('/api/projects/:id/render', wrap(async (req, res) => {
 function editPlan(id, fn) {
   const f = path.join(pdir(id), 'scene_plan.json'); const plan = rd(f); fn(plan);
   plan.scenes.sort((a, b) => a.start - b.start);
-  plan.scenes.forEach((x) => { x.duration = +(x.end - x.start).toFixed(2); });
+  plan.scenes.forEach((x) => { x.duration = +(x.end - x.start).toFixed(2); if (x.motion) x.motion.duration = x.duration; });
   fs.writeFileSync(f, JSON.stringify(plan, null, 2));
 }
 app.put('/api/projects/:id/scenes/:sid', wrap((req, res) => {
-  const sid = +req.params.sid, { prompt, start, end } = req.body;
+  const sid = +req.params.sid, { prompt, start, end, motion } = req.body;
   editPlan(req.params.id, (p) => { const sc = p.scenes.find((x) => x.scene_id === sid);
     if (typeof prompt === 'string') sc.prompt = prompt;
-    if (isFinite(start)) sc.start = +start; if (isFinite(end)) sc.end = +end; });
+    if (isFinite(start)) sc.start = +start; if (isFinite(end)) sc.end = +end;
+    if (motion && MOTION_TYPES.includes(motion.type)) {
+      sc.motion = { type: motion.type, intensity: Math.max(0, Math.min(0.15, Number(motion.intensity) || 0)),
+        direction: motion.type.startsWith('pan_') ? motion.type.slice(4) : 'center', duration: +(sc.end - sc.start).toFixed(2) };
+    } });
   res.json({ ok: true });
 }));
 app.post('/api/projects/:id/scenes/:sid/regenerate', wrap((req, res) => {
@@ -428,4 +781,4 @@ app.use(express.static('public'));
 const port = process.env.PORT || 3000;
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve('server.js')) app.listen(port, '127.0.0.1', () => console.log(`http://localhost:${port}  ffmpeg=${ffmpegOk()} key=${!!openai}`));
 
-export { app, STYLE, newProject, transcribe, planScenes, analyze, generateImages, summarize, genImage, render, load, pdir, patch, M, IMG_SIZE, MAX_SCENES, ffmpegOk, ffprobeOk, audioDuration, FFMPEG, FFPROBE, run, redact };
+export { app, STYLE, newProject, transcribe, planScenes, planVisualSequences, summarize, summarizeVisualSequences, chooseTestFrames, generateTestFrames, renderVisualTest, analyze, generateImages, genImage, render, load, pdir, patch, M, IMG_SIZE, MAX_SCENES, ffmpegOk, ffprobeOk, audioDuration, FFMPEG, FFPROBE, run, redact };
