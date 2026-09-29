@@ -20,14 +20,41 @@ pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:
 .sequence{padding:12px 0;border-top:1px solid #262b35}.seq-frame{display:grid;grid-template-columns:76px 150px minmax(180px,1fr) 150px;gap:12px;align-items:start;padding:8px 0;border-top:1px solid #262b35}.frame-thumb{width:72px;aspect-ratio:16/9;object-fit:cover;background:#fff;border-radius:4px}.seq-frame details{grid-column:3/5}.seq-frame summary{cursor:pointer;color:var(--mut);font-size:13px}.seq-frame pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:700px){body{padding:14px}.scene{grid-template-columns:1fr}.scene img,.ph{width:100%}.seq-frame{grid-template-columns:64px 1fr}.seq-frame details{grid-column:1/3}.seq-frame .frame-thumb{grid-row:1/3}}
 #sub{position:absolute;bottom:6%;left:5%;right:5%;text-align:center;color:#fff;text-shadow:0 0 4px #000,0 0 4px #000;font-size:18px}
+.mode-tabs{margin:14px 0}.mode-tabs .active{background:#447b5b}.ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.ai-field{display:grid;gap:6px}.ai-field textarea{min-height:220px;line-height:1.5}.ai-field select,.ai-field input{background:#0f1115;color:var(--fg);border:1px solid #414752;border-radius:6px;padding:9px}.ai-audio{display:grid;grid-template-columns:100px 1fr;gap:10px;align-items:center;margin-top:8px}.ai-audio audio{width:100%}.ai-review{border-top:1px solid #333;padding-top:12px;margin-top:12px}.ai-progress{font-size:14px}.ai-actions{margin-top:12px}.ai-actions button{min-height:38px}.ai-storyboard{max-height:330px;overflow:auto;white-space:pre-wrap}@media(max-width:700px){.ai-grid{grid-template-columns:1fr}.ai-field textarea{min-height:180px}}
 </style></head><body>
 <h1>🎙️ Audio → Video de YouTube</h1>
+<div class="row mode-tabs"><button id="audioModeTab" class="g" onclick="setMode('audio')">VOICE INPUT</button><button id="aiModeTab" class="g" onclick="setMode('ai')">AI VOICE</button></div>
 <div class="card"><div class="row"><b>Estado del sistema</b><button class="g" onclick="health()">RE-CHECK</button></div><div id="health" class="mut">Comprobando…</div></div>
-<div class="card row"><input type="file" id="f" accept=".wav,.mp3,.m4a,.mp4" hidden>
+<div class="card row" id="voiceInputMode"><input type="file" id="f" accept=".wav,.mp3,.m4a,.mp4" hidden>
 <button onclick="f.click()">UPLOAD AUDIO</button><span id="fn" class="mut">Ningún archivo</span>
 <button id="gen" disabled onclick="analyze()">ANALYZE</button>
 <button id="vseqbtn" class="g" disabled onclick="planSequences()">PLAN VISUAL SEQUENCES</button>
 <button id="gimg" disabled onclick="genImgs()">GENERATE IMAGES</button></div>
+<section class="card" id="aiVoiceMode" hidden>
+ <div class="row"><b>AI VOICE</b><span class="warn">AI-generated voice</span><span class="mut">La voz es sintética. Las voces se optimizan para inglés; compara Marin y Cedar para decidir cuál funciona mejor en español.</span></div>
+ <div class="ai-grid" style="margin-top:14px">
+  <label class="ai-field">Title<input id="scriptTitle" value="¿Por qué Venezuela puede convertirse en una pieza clave del tablero petrolero mundial?"></label>
+  <label class="ai-field">Voice<select id="voiceSelect"></select><span class="mut">Default: Marin</span></label>
+  <label class="ai-field">Language<select id="voiceLanguage"><option>Español latinoamericano</option></select></label>
+  <label class="ai-field">Style<select id="voiceStyle"><option>Natural YouTube Narrator</option></select><span class="mut">La dirección de voz se adapta a cada sección del guion.</span></label>
+ </div>
+ <label class="ai-field" style="margin-top:14px">SCRIPT<textarea id="scriptText" spellcheck="true">Imagina una caja fuerte enorme bajo tu casa, llena de petróleo. No tienes la llave y tus vecinos también quieren decidir quién la abre. Así se entiende el acuerdo petrolero entre Estados Unidos y Venezuela.
+
+El 28 de agosto, Donald Trump afirmó que Estados Unidos tendría control mayoritario sobre más de 65 mil millones de barriles de reservas probadas. Reuters reportó dudas legales y posibles desafíos constitucionales.
+
+Petróleo bajo tierra no significa petróleo listo para vender.
+
+El 29 de septiembre, Reuters informó que GeoPark planea invertir siete mil millones de dólares en el campo Bare. Su meta: producir 90 mil barriles diarios para 2038. Es un plan de largo plazo, no petróleo disponible mañana.
+
+La pregunta no es solo quién tiene las reservas, sino quién produce, compra y transporta ese petróleo. Encontrar la caja fuerte es una cosa; controlar la llave, el transporte y el destino es otra.</textarea></label>
+ <div class="row ai-actions"><button class="g" id="voiceTestButton" onclick="testVoice()">TEST VOICE</button><button id="generateVoiceButton" onclick="generateVoice()">GENERATE VOICE</button><span class="mut" id="ttsMeta"></span></div>
+ <div id="voiceTestResults" class="ai-review" hidden><b>Voice test · same script</b><div class="ai-audio"><button class="g" onclick="playVoice('marin')">PLAY MARIN</button><audio id="marinAudio" controls></audio></div><div class="ai-audio"><button class="g" onclick="playVoice('cedar')">PLAY CEDAR</button><audio id="cedarAudio" controls></audio></div><span class="mut" id="voiceTestMeta"></span></div>
+ <div id="aiVoiceReview" class="ai-review" hidden><div class="row"><b>VOICE GENERATED</b><span class="ok" id="voiceReviewSummary"></span><audio id="generatedVoiceAudio" controls></audio></div><div class="ai-progress" id="aiVoiceProgress"></div>
+  <div id="storyboardReview" class="ai-review" hidden><b>STORYBOARD REVIEW</b><div class="kpi" id="storyboardSummary"></div><pre id="storyboardPreview" class="ai-storyboard"></pre></div>
+  <div class="row ai-actions"><button id="generateTestVideoButton" onclick="generateAIVoiceVideo()" disabled>GENERATE 10-FRAME TEST VIDEO</button><a id="aiVideoDownload" hidden><button class="g">DOWNLOAD TEST VIDEO</button></a></div>
+  <div class="row ai-actions" id="frameBatchControls" hidden><button class="g" onclick="generateFrameBatch(10)">GENERATE NEXT 10</button><button class="g" onclick="generateFrameBatch(25)">GENERATE NEXT 25</button><button class="d" onclick="generateFrameBatch('all')">GENERATE ALL REMAINING</button><span class="mut">Cost estimate appears before image generation.</span></div>
+ </div>
+</section>
 <div id="proj" hidden>
  <div class="card"><div class="row"><b id="pn"></b><span class="mut" id="pd"></span></div>
  <div class="steps row" id="steps" style="margin-top:10px"></div><div id="err" class="st-failed"></div><pre id="log"></pre></div>
@@ -37,7 +64,8 @@ pre{background:#0b0d11;padding:10px;border-radius:8px;max-height:160px;overflow:
  <div class="card" id="scenec"><div class="row"><b>Escenas</b><button id="rb" disabled onclick="rend()">RENDER VIDEO</button><a id="dl" hidden><button class="g">DOWNLOAD final_video.mp4</button></a></div><div id="sc"></div></div>
 </div>
 <script>
-let P=null,T=null,S=['Upload','Transcribe','Analyze','Review plan','Generate images','Render video'];
+let P=null,T=null,S=['Upload','Transcribe','Analyze','Review plan','Generate images','Render video'],uiMode=localStorage.aiVoiceMode||'audio';
+const AI_VOICES=['alloy','ash','ballad','coral','echo','fable','nova','onyx','sage','shimmer','verse','marin','cedar'];
 const motionTypes=['zoom_in','zoom_out','pan_left','pan_right','pan_up','pan_down','pan_diagonal','zoom_in_fast','static'];
 const motionLabels={zoom_in:'Zoom in',zoom_out:'Zoom out',pan_left:'Pan left',pan_right:'Pan right',pan_up:'Pan up',pan_down:'Pan down',pan_diagonal:'Pan diagonal',zoom_in_fast:'Fast zoom',static:'Static'};
 const $=id=>document.getElementById(id),tc=x=>`${Math.floor(x/60)}:${String(Math.floor(x%60)).padStart(2,'0')}`;
@@ -45,17 +73,25 @@ const tc3=x=>{const ms=Math.round(x*1000),s=Math.floor(ms/1000),m=Math.floor(s/6
 const api=async(u,o={})=>{const r=await fetch('/api'+u,{...o,headers:o.body&&!(o.body instanceof FormData)?{'Content-Type':'application/json'}:{}});const j=await r.json();if(!r.ok){const e=new Error(j.error);e.code=j.code;throw e}return j};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mark=(ok,t,extra)=>`<div><span class="${ok===true?'ok':ok===false?'bad':'warn'}">${ok===true?'✓':ok===false?'✗':'?'}</span> ${esc(t)}${extra?` <span class="mut">${esc(extra)}</span>`:''}</div>`;
+function setMode(mode){uiMode=mode;localStorage.aiVoiceMode=mode;$('voiceInputMode').hidden=mode!=='audio';$('aiVoiceMode').hidden=mode!=='ai';$('audioModeTab').classList.toggle('active',mode==='audio');$('aiModeTab').classList.toggle('active',mode==='ai')}
+function initVoiceControls(){const select=$('voiceSelect');if(select.options.length)return;for(const voice of AI_VOICES){const option=document.createElement('option');option.value=voice;option.textContent=voice[0].toUpperCase()+voice.slice(1);if(voice==='marin')option.selected=true;select.append(option)}}
 async function health(){$('health').textContent='Comprobando…';try{const h=await api('/health'),o=h.openai,m=o.models||{};
  $('health').innerHTML=mark(h.ffmpeg.ok,'FFmpeg',h.ffmpeg.ok?'':h.ffmpeg.help)+mark(h.ffprobe.ok,'FFprobe',h.ffprobe.ok?'':h.ffprobe.help)
   +mark(o.configured,'OPENAI_API_KEY configurada',o.configured?'':'falta en .env')
   +(o.configured?mark(o.connection.ok,'Conexión con OpenAI',o.connection.error):'')
   +[['reasoning','Modelo de razonamiento'],['transcription','Modelo de transcripción'],['image','Modelo de imagen'],['timestamps_fallback','Modelo timestamps (fallback)']].filter(([k])=>m[k])
     .map(([k,n])=>mark(m[k].available,`${n}: ${m[k].id}`,m[k].available===true?'disponible':m[k].error)).join('')
-  +`<div class="mut">Límite MAX_SCENES=${h.maxScenes} · imágenes ${esc(h.imageSettings.size)} (${esc(h.imageSettings.quality)})${o.note?' · '+esc(o.note):''}</div>`}catch(e){$('health').innerHTML=mark(false,'No se pudo consultar /api/health',e.message)}}
-health();
+  +mark(m.tts?.available,`TTS: ${h.voice?.model||'no disponible'}`,`voz predeterminada ${h.voice?.defaultVoice||'marin'}`)
+  +`<div class="mut">Límite MAX_SCENES=${h.maxScenes} · imágenes ${esc(h.imageSettings.size)} (${esc(h.imageSettings.quality)}) · voz AI-generated${o.note?' · '+esc(o.note):''}</div>`;if(h.voice&&AI_VOICES.includes(h.voice.defaultVoice))$('voiceSelect').value=h.voice.defaultVoice}catch(e){$('health').innerHTML=mark(false,'No se pudo consultar /api/health',e.message)}}
+initVoiceControls();setMode(uiMode);health();
 $('f').onchange=async()=>{const file=$('f').files[0];if(!file)return;$('fn').textContent=file.name+' — subiendo…';
  const fd=new FormData();fd.append('audio',file);try{const {id}=await api('/projects',{method:'POST',body:fd});P=id;localStorage.p=id;await poll();}catch(e){$('fn').textContent='Error al subir';alert(e.message)}};
 async function analyze(){try{await api(`/projects/${P}/analyze`,{method:'POST'});poll()}catch(e){alert(e.message)}}
+async function testVoice(){const button=$('voiceTestButton');button.disabled=true;button.textContent='GENERATING MARIN + CEDAR…';try{const result=await api('/voice-test',{method:'POST'});for(const item of result.files){const audio=$(item.voice+'Audio');audio.src=`/api/voice-test/${item.voice}?t=${Date.now()}`;audio.load()}$('voiceTestResults').hidden=false;$('voiceTestMeta').textContent=`${result.model} · ${result.apiCalls} TTS requests · 0 images · Marin ${tc(result.files.find(file=>file.voice==='marin').duration)} · Cedar ${tc(result.files.find(file=>file.voice==='cedar').duration)}`;$('ttsMeta').textContent=`Model: ${result.model}`}catch(e){alert(e.message)}finally{button.disabled=false;button.textContent='TEST VOICE'}}
+function playVoice(voice){$(voice+'Audio').play()}
+async function generateVoice(){const script=$('scriptText').value.trim();if(!script)return alert('Pega un guion antes de generar la voz.');const button=$('generateVoiceButton');button.disabled=true;button.textContent='GENERATING VOICE…';try{const result=await api('/ai-voice/projects',{method:'POST',body:JSON.stringify({title:$('scriptTitle').value.trim(),script,voice:$('voiceSelect').value})});P=result.id;localStorage.p=P;setMode('ai');await poll()}catch(e){alert(e.message)}finally{button.disabled=false;button.textContent='GENERATE VOICE'}}
+async function generateAIVoiceVideo(){if(!confirm('Se generarán únicamente los primeros 10 frames de la secuencia 1 y un MP4 de prueba. No se generarán otros frames. ¿Continuar?'))return;const button=$('generateTestVideoButton');button.disabled=true;button.textContent='GENERATING 10 FRAMES…';try{await api(`/projects/${P}/ai-voice/test-video`,{method:'POST'});await poll()}catch(e){alert(e.message);button.disabled=false;button.textContent='GENERATE 10-FRAME TEST VIDEO'}}
+async function generateFrameBatch(count){const storyboard=T?.visualStoryboard;if(!storyboard)return;const pending=Math.max(0,storyboard.estimated_image_generations-(T.aiVoice?.generatedFrames||0));const amount=count==='all'?pending:Math.min(count,pending);if(!amount)return alert('No quedan frames pendientes.');if(!confirm(`Se generarán ${amount} imágenes de ${storyboard.total_frames}. ¿Continuar?`))return;try{await api(`/projects/${P}/ai-voice/frames`,{method:'POST',body:JSON.stringify({count,confirmAll:count==='all'})});await poll()}catch(e){alert(e.message)}}
 async function planSequences(){const b=$('vseqbtn');b.disabled=true;b.textContent='PLANNING…';try{await api(`/projects/${P}/visual-sequences`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='PLAN VISUAL SEQUENCES'}}
 async function genTestFrames(){const b=$('testframes');if(!confirm('Se generarán exactamente 5 imágenes de prueba. No se generarán las demás. ¿Continuar?'))return;b.disabled=true;b.textContent='GENERATING 5…';try{await api(`/projects/${P}/visual-sequences/test-frames`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='GENERATE 5 TEST FRAMES'}}
 async function renderTest(){const b=$('testrender');b.disabled=true;b.textContent='RENDERING…';try{await api(`/projects/${P}/visual-sequences/test-render`,{method:'POST'});await poll()}catch(e){alert(e.message);b.disabled=false;b.textContent='RENDER TEST'}}
@@ -63,8 +99,9 @@ async function genImgs(){const sm=T.summary;let body;
  if(sm.overLimit){if(!confirm(`⚠ El plan tiene ${sm.scenes} escenas y el límite MAX_SCENES es ${sm.maxScenes}.\nSe generarán ${sm.imagesToGenerate} imágenes con ${sm.model} y el coste puede ser alto.\n¿Generar de todos modos?`))return;body=JSON.stringify({confirmOverLimit:true})}
  try{await api(`/projects/${P}/generate-images`,{method:'POST',body});poll()}catch(e){alert(e.message)}}
 async function rend(){$('rb').disabled=true;$('rb').textContent='RENDERING…';try{await api(`/projects/${P}/render`,{method:'POST'})}catch(e){alert(e.message)}$('rb').textContent='RENDER VIDEO';poll()}
+function drawAIVoice(){const ai=T?.aiVoice;const review=$('aiVoiceReview');$('ttsMeta').textContent=T?.ttsModel?`Model: ${T.ttsModel}`:'';if(!ai){review.hidden=true;return}review.hidden=false;$('voiceReviewSummary').textContent=`Voice: ${ai.voice||'Marin'} · Duration: ${tc(T.duration||ai.duration||0)} · ${ai.model||''}`;$('aiVoiceProgress').textContent=`${ai.status||'queued'} · ${ai.stage||'voice'}`;const audio=$('generatedVoiceAudio'),audioUrl=`/files/${P}/audio/narration_final.mp3`;if(ai.voiceReady&&audio.dataset.url!==audioUrl){audio.dataset.url=audioUrl;audio.src=audioUrl;audio.load()}const storyboard=T.visualStoryboard,reviewPanel=$('storyboardReview');reviewPanel.hidden=!storyboard;if(storyboard){$('storyboardSummary').innerHTML=`<div><b>${tc(storyboard.duration)}</b>duration</div><div><b>${storyboard.sequences.length}</b>sequences</div><div><b>${storyboard.total_frames}</b>frames</div><div><b>${storyboard.estimated_image_generations}</b>estimated image generations</div><div><b>${storyboard.validation?.status||'pending'}</b>continuity check</div>`;$('storyboardPreview').textContent=storyboard.sequences.map(sequence=>`Sequence ${sequence.sequence_id}: ${sequence.title}\n${sequence.frames.slice(0,5).map(frame=>`  ${frame.frame_id}. ${frame.action}`).join('\n')}`).join('\n\n')}const sample=ai.sampleVideo;$('generateTestVideoButton').disabled=!storyboard||T.running||!ai.voiceReady||sample?.status==='generating'||sample?.status==='completed';$('generateTestVideoButton').textContent=sample?.status==='completed'?'10-FRAME TEST VIDEO ✓':'GENERATE 10-FRAME TEST VIDEO';$('aiVideoDownload').hidden=sample?.status!=='completed';if(sample?.status==='completed'){$('aiVideoDownload').href=`/files/${P}/${sample.output}?t=${Date.now()}`;$('aiVideoDownload').download='test_10_frames.mp4'}$('aiSampleImages').innerHTML=sample?.files?.map((file,index)=>`<a href="/files/${P}/${file}" target="_blank" title="Frame ${index+1}"><img class="frame-thumb" src="/files/${P}/${file}" alt="Frame ${index+1}"></a>`).join('')||'';$('frameBatchControls').hidden=sample?.status!=='completed'}
 async function poll(){if(!P)return;T=await api('/projects/'+P);draw();if(T.running)setTimeout(poll,2000)}
-function draw(){const sm=T.summary,busy=T.running;$('proj').hidden=false;$('fn').textContent=T.name;$('pn').textContent=T.name;
+function draw(){drawAIVoice();const sm=T.summary,busy=T.running;$('proj').hidden=false;$('fn').textContent=T.name;$('pn').textContent=T.name;
  $('pd').textContent=`Duración ${tc(T.duration)} · ${busy?'procesando…':T.plan?'listo':'sin analizar'}`;
  const step=T.step||1;$('steps').innerHTML=S.map((n,i)=>`<span class="${i+1===step?'on':i+1<step?'done':''}">STEP ${i+1} · ${n}</span>`).join('');
  $('err').textContent=T.error||'';$('log').textContent=(T.logs||[]).slice(-25).join('\n');$('log').scrollTop=1e9;

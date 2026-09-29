@@ -5,7 +5,12 @@
  "scripts": {
   "start": "node server.js",
   "test:plan": "node test.js plan",
-        "test:sequence-plan": "node test.js sequence-plan",
+      "test:sequence-plan": "node test.js sequence-plan",
+      "test:voice": "node test.js voice",
+      "test:transcription": "node test.js transcription",
+      "test:storyboard": "node test.js storyboard",
+      "test:frames": "node test.js frames",
+      "test:full": "node test.js full",
   "test:image": "node test.js image",
   "test:render": "node test.js render",
   "test:flow": "node test.js flow"
